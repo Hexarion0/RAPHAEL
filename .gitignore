@@ -3,6 +3,15 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# User privacy & Local audio recordings
+data/
+*.wav
+*.mp3
+*.ogg
+*.flac
+models/custom/
+
+
 # C extensions
 *.so
 

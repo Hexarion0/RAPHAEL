@@ -93,10 +93,18 @@ class WakeWordDetector:
     def _resolve_model_paths(models: list[str] | None) -> list[str]:
         """Resolve model names or filepaths to exact model paths."""
         pretrained_paths = openwakeword.get_pretrained_model_paths()
-        if not models:
-            return pretrained_paths
 
         resolved: list[str] = []
+
+        # Auto-load any custom models trained in models/custom/
+        custom_dir = Path("models/custom")
+        if custom_dir.exists():
+            for custom_model in custom_dir.glob("*.onnx"):
+                resolved.append(str(custom_model.resolve()))
+
+        if not models:
+            return resolved or pretrained_paths
+
         for requested in models:
             req_path = Path(requested)
             if req_path.is_file() and requested.endswith(".onnx"):

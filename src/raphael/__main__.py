@@ -4,7 +4,13 @@ import argparse
 import sys
 import time
 
-from raphael.audio import SpeechToText, WakeListenerLoop, WakeWordDetector
+from raphael.audio import (
+    SpeechToText,
+    WakeListenerLoop,
+    WakeWordDetector,
+    record_voice_samples,
+    train_custom_wakeword,
+)
 from raphael.config import get_settings
 from raphael.logging import setup_logging
 from raphael.platform import get_audio_backend
@@ -14,11 +20,44 @@ def main() -> int:
     """Initialize core settings, start logging, and launch RAPHAEL."""
     parser = argparse.ArgumentParser(description="RAPHAEL Desktop AI Assistant")
     parser.add_argument(
+        "command",
+        nargs="?",
+        default="run",
+        choices=["run", "listen", "record-samples", "train-wake"],
+        help="Command to run: 'run' (default), 'listen', 'record-samples', 'train-wake'",
+    )
+    parser.add_argument(
         "--listen",
         action="store_true",
         help="Start the continuous wake-word listener loop with STT transcription",
     )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=8,
+        help="Number of voice samples to record for training (default: 8)",
+    )
+    parser.add_argument(
+        "--phrase",
+        type=str,
+        default="Hey Raphael",
+        help="Target wake phrase to train (default: 'Hey Raphael')",
+    )
     args = parser.parse_args()
+
+    # If user ran `python -m raphael record-samples`
+    if args.command == "record-samples":
+        record_voice_samples(count=args.count, phrase=args.phrase)
+        return 0
+
+    # If user ran `python -m raphael train-wake`
+    if args.command == "train-wake":
+        try:
+            train_custom_wakeword()
+        except Exception as err:
+            print(f"\n❌ Training failed: {err}")
+            return 1
+        return 0
 
     settings = get_settings()
     logger = setup_logging(settings.app.log_level)
@@ -60,7 +99,7 @@ def main() -> int:
         settings.providers.ollama_host,
     )
 
-    if args.listen:
+    if args.listen or args.command == "listen":
         logger.info("Initializing wake-word and Whisper STT engine...")
         detector = WakeWordDetector(
             wake_phrase=settings.audio.wake_word,
@@ -107,7 +146,9 @@ def main() -> int:
             logger.info("Wake listener terminated cleanly.")
             return 0
 
-    logger.info("Ready. Use '--listen' for live voice listening.")
+    logger.info("Ready. Use 'python -m raphael --listen' for live voice listening.")
+    logger.info("Use 'python -m raphael record-samples' to record voice samples.")
+    logger.info("Use 'python -m raphael train-wake' to train a personalized wake model.")
     return 0
 
 
