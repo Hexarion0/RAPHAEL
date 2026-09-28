@@ -118,7 +118,10 @@ class WakeListenerLoop:
                         logger.error("Error in on_transcription callback: %s", err)
 
                 with self._lock:
-                    if self._state == ListenerState.PROCESSING:
+                    if self._state == ListenerState.RECORDING:
+                        # Barge-in already started recording user utterance — preserve state
+                        pass
+                    elif self._state == ListenerState.PROCESSING:
                         if keep_listening:
                             logger.info(
                                 "👂 Follow-up mode active — speak next request or say 'Goodbye'."
@@ -155,13 +158,6 @@ class WakeListenerLoop:
                 if rms >= self.barge_in_threshold_rms or self.detector.process_frame(indata):
                     logger.info("🛑 Barge-in! Stopping all playback and listening...")
                     self.tts.stop()
-                    # Clear pending background processing queue
-                    while not self._processing_queue.empty():
-                        try:
-                            self._processing_queue.get_nowait()
-                            self._processing_queue.task_done()
-                        except queue.Empty:
-                            break
                     if self.on_barge_in:
                         try:
                             self.on_barge_in()

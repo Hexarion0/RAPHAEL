@@ -191,7 +191,6 @@ def main() -> int:
                 logger.info('🤖 RAPHAEL: "%s"', reply)
                 tts.speak(reply, block=True)
                 _in_followup[0] = True
-                tts.speak("Go ahead.", block=False)
                 return True
 
             # Check if user requested pause / wait
@@ -245,10 +244,8 @@ def main() -> int:
                     _in_followup[0] = False
                     return False
 
-                # Stay in follow-up conversation mode; prompt on first turn
-                if not _in_followup[0]:
-                    _in_followup[0] = True
-                    tts.speak("Go ahead.", block=False)
+                # Stay in follow-up conversation mode
+                _in_followup[0] = True
                 return True
 
             except Exception as err:
