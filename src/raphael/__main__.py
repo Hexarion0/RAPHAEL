@@ -1,7 +1,10 @@
 """Entry point for running RAPHAEL via `python -m raphael`."""
 
+import argparse
 import sys
+import time
 
+from raphael.audio import WakeListenerLoop, WakeWordDetector
 from raphael.config import get_settings
 from raphael.logging import setup_logging
 from raphael.platform import get_audio_backend
@@ -9,6 +12,14 @@ from raphael.platform import get_audio_backend
 
 def main() -> int:
     """Initialize core settings, start logging, and launch RAPHAEL."""
+    parser = argparse.ArgumentParser(description="RAPHAEL Desktop AI Assistant")
+    parser.add_argument(
+        "--listen",
+        action="store_true",
+        help="Start the continuous wake-word listener loop",
+    )
+    args = parser.parse_args()
+
     settings = get_settings()
     logger = setup_logging(settings.app.log_level)
 
@@ -44,7 +55,43 @@ def main() -> int:
         settings.providers.ollama_host,
     )
 
-    logger.info("Audio backend initialized successfully. (Milestone 1.1: Audio Backend)")
+    if args.listen:
+        logger.info("Starting live wake-word listener... (Say 'Hey Jarvis' or 'Alexa')")
+        detector = WakeWordDetector(
+            models=settings.audio.wake_models,
+            threshold=settings.audio.wake_threshold,
+            cooldown_seconds=settings.audio.wake_cooldown,
+        )
+
+        def on_wake(info: dict):
+            logger.info("🎯 Wake detected! Details: %s", info)
+
+        def on_utterance(audio_data, wake_info):
+            logger.info(
+                "🎙️ Recorded utterance: %d samples (%.2fs). Ready for STT.",
+                len(audio_data),
+                len(audio_data) / settings.audio.sample_rate,
+            )
+
+        loop = WakeListenerLoop(
+            audio_backend=audio_backend,
+            detector=detector,
+            on_wake=on_wake,
+            on_utterance=on_utterance,
+            sample_rate=settings.audio.sample_rate,
+            device=settings.audio.input_device,
+        )
+
+        loop.start()
+        try:
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            loop.stop()
+            logger.info("Wake listener terminated cleanly.")
+            return 0
+
+    logger.info("Ready. Use '--listen' to start live wake listening. (Milestone 1.2: Wake Word)")
     return 0
 
 

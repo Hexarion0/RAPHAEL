@@ -45,6 +45,18 @@ class AudioConfig(BaseModel):
     """Audio and voice loop settings."""
 
     wake_word: str = Field(default="raphael", description="Wake word trigger phrase")
+    wake_threshold: float = Field(
+        default=0.5,
+        description="Wake word detection threshold (0.0 - 1.0)",
+    )
+    wake_cooldown: float = Field(
+        default=2.0,
+        description="Cooldown seconds after wake trigger",
+    )
+    wake_models: list[str] = Field(
+        default_factory=lambda: ["hey_jarvis", "alexa"],
+        description="List of openWakeWord model names or custom model paths",
+    )
     sample_rate: int = Field(default=16000, description="Audio sample rate in Hz")
     channels: int = Field(default=1, description="Audio channel count (1 for mono)")
     input_device: int | str | None = Field(
@@ -80,6 +92,8 @@ class Settings(BaseSettings):
 
     # Audio settings
     wake_word: str = Field(default="raphael")
+    wake_threshold: float = Field(default=0.5)
+    wake_cooldown: float = Field(default=2.0)
     audio_sample_rate: int = Field(default=16000)
     audio_channels: int = Field(default=1)
     audio_input_device: int | str | None = Field(default=None)
@@ -109,6 +123,8 @@ class Settings(BaseSettings):
         """Structured audio configuration."""
         return AudioConfig(
             wake_word=self.wake_word,
+            wake_threshold=self.wake_threshold,
+            wake_cooldown=self.wake_cooldown,
             sample_rate=self.audio_sample_rate,
             channels=self.audio_channels,
             input_device=self.audio_input_device,

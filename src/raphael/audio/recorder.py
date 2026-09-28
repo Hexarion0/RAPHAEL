@@ -1,0 +1,113 @@
+"""Voice utterance recorder with silence / VAD energy cutoff."""
+
+import time
+
+import numpy as np
+
+from raphael.logging import get_logger
+
+logger = get_logger("audio.recorder")
+
+
+class VoiceRecorder:
+    """Records speech utterances with dynamic silence detection."""
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        silence_threshold_rms: float = 0.015,
+        silence_duration_seconds: float = 1.2,
+        min_speech_duration_seconds: float = 0.5,
+        max_duration_seconds: float = 10.0,
+    ) -> None:
+        self.sample_rate = sample_rate
+        self.silence_threshold_rms = silence_threshold_rms
+        self.silence_duration_seconds = silence_duration_seconds
+        self.min_speech_duration_seconds = min_speech_duration_seconds
+        self.max_duration_seconds = max_duration_seconds
+
+        self._buffer: list[np.ndarray] = []
+        self._is_recording = False
+        self._speech_started = False
+        self._speech_start_time = 0.0
+        self._last_speech_time = 0.0
+        self._start_time = 0.0
+
+    def start(self) -> None:
+        """Begin accumulating speech audio frames."""
+        self._buffer.clear()
+        self._is_recording = True
+        self._speech_started = False
+        self._start_time = time.time()
+        self._speech_start_time = self._start_time
+        self._last_speech_time = self._start_time
+        logger.info("🎙️ Utterance recording started. Listening for speech...")
+
+    def add_frame(self, audio_frame: np.ndarray) -> bool:
+        """Add an incoming audio frame and check if the utterance has concluded.
+
+        Returns:
+            True if recording should continue, False if recording is finished (silence or timeout).
+        """
+        if not self._is_recording:
+            return False
+
+        # Flatten frame
+        frame = audio_frame.squeeze()
+        self._buffer.append(frame.copy())
+        now = time.time()
+
+        # Calculate frame RMS
+        if np.issubdtype(frame.dtype, np.floating):
+            float_frame = frame
+        else:
+            float_frame = frame.astype(np.float32) / 32768.0
+
+        rms = float(np.sqrt(np.mean(float_frame**2))) if float_frame.size > 0 else 0.0
+
+        # Check speech presence
+        if rms >= self.silence_threshold_rms:
+            if not self._speech_started:
+                self._speech_started = True
+                self._speech_start_time = now
+                logger.debug("Speech activity detected (RMS=%.4f).", rms)
+            self._last_speech_time = now
+        else:
+            # Silence observed
+            if self._speech_started:
+                silence_elapsed = now - self._last_speech_time
+                speech_duration = self._last_speech_time - self._speech_start_time
+                if (
+                    silence_elapsed >= self.silence_duration_seconds
+                    and speech_duration >= self.min_speech_duration_seconds
+                ):
+                    logger.info(
+                        "Silence detected after speech (%.1fs). Concluding utterance.",
+                        silence_elapsed,
+                    )
+                    self._is_recording = False
+                    return False
+
+        # Hard timeout check
+        if (now - self._start_time) >= self.max_duration_seconds:
+            logger.info(
+                "Maximum recording duration reached (%.1fs). Concluding utterance.",
+                self.max_duration_seconds,
+            )
+            self._is_recording = False
+            return False
+
+        return True
+
+    def get_audio(self) -> np.ndarray:
+        """Return the accumulated audio as a single 1D float32 numpy array."""
+        if not self._buffer:
+            return np.empty((0,), dtype=np.float32)
+        combined = np.concatenate(self._buffer)
+        if np.issubdtype(combined.dtype, np.floating):
+            return combined.astype(np.float32)
+        return (combined.astype(np.float32) / 32768.0).astype(np.float32)
+
+    def is_recording(self) -> bool:
+        """Return True if currently active."""
+        return self._is_recording

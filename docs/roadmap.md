@@ -188,7 +188,7 @@ RAPHAEL should remain idle until you say:
 
 #### 1.2.1 Integration
 
-- [ ] Integrate openWakeWord, or
+- [x] Integrate openWakeWord, or
 - [ ] Integrate Porcupine
 
 #### 1.2.2 Detection
@@ -199,7 +199,7 @@ Listening...
 [Wake word detected]
 ```
 
-- [ ] Detect the wake word reliably
+- [x] Detect the wake word reliably
 
 #### 1.2.3 Connect to Recording
 
@@ -209,21 +209,21 @@ Wake word
 Start recording
 ```
 
-- [ ] Wire wake detection to start recording
+- [x] Wire wake detection to start recording
 
 #### 1.2.4 Cooldown Protection
 
-- [ ] Add cooldown protection after a trigger
+- [x] Add cooldown protection after a trigger
 
 #### 1.2.5 Refine
 
-- [ ] Test in a quiet room
-- [ ] Test with music playing
-- [ ] Test with game audio
-- [ ] Test with people talking
-- [ ] Test at different distances
-- [ ] Test at different speaking volumes
-- [ ] Tune false positives and false negatives
+- [x] Test in a quiet room
+- [x] Test with music playing
+- [x] Test with game audio
+- [x] Test with people talking
+- [x] Test at different distances
+- [x] Test at different speaking volumes
+- [x] Tune false positives and false negatives
 
 ---
 
