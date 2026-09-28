@@ -18,8 +18,8 @@ class SpeechToText:
     def __init__(
         self,
         model_size: str = "base.en",
-        device: str = "auto",
-        compute_type: str = "default",
+        device: str = "cpu",
+        compute_type: str = "int8",
         language: str = "en",
     ) -> None:
         self.model_size = model_size
@@ -33,14 +33,15 @@ class SpeechToText:
             device,
             compute_type,
         )
+        self.model = self._load_model(model_size, device, compute_type)
 
+    def _load_model(self, model_size: str, device: str, compute_type: str) -> WhisperModel:
         try:
-            self.model = WhisperModel(
+            return WhisperModel(
                 model_size_or_path=model_size,
                 device=device,
                 compute_type=compute_type,
             )
-            logger.info("faster-whisper model '%s' initialized successfully.", model_size)
         except Exception as err:
             logger.warning(
                 "Whisper initialization failed (device=%s, type=%s): %s. Falling back to CPU/int8.",
@@ -48,12 +49,13 @@ class SpeechToText:
                 compute_type,
                 err,
             )
-            self.model = WhisperModel(
+            self.device = "cpu"
+            self.compute_type = "int8"
+            return WhisperModel(
                 model_size_or_path=model_size,
                 device="cpu",
                 compute_type="int8",
             )
-            logger.info("faster-whisper loaded on CPU/int8 fallback.")
 
     def transcribe(
         self,
@@ -76,7 +78,6 @@ class SpeechToText:
         beam_size: int = 5,
     ) -> dict[str, Any]:
         """Transcribe audio and return full segment details and timing statistics."""
-        # Convert numpy array to 1D float32 normalized
         if isinstance(audio, np.ndarray):
             if audio.size == 0:
                 return {
@@ -93,29 +94,63 @@ class SpeechToText:
         target_lang = language or self.language
         start_t = time.time()
 
-        segments_generator, info = self.model.transcribe(
-            audio_input,
-            language=target_lang,
-            beam_size=beam_size,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
-        )
-
-        segments_list = []
-        text_parts = []
-        for segment in segments_generator:
-            cleaned_text = segment.text.strip()
-            if cleaned_text:
-                text_parts.append(cleaned_text)
-                segments_list.append(
-                    {
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": cleaned_text,
-                        "avg_logprob": segment.avg_logprob,
-                        "no_speech_prob": segment.no_speech_prob,
-                    }
-                )
+        try:
+            segments_generator, info = self.model.transcribe(
+                audio_input,
+                language=target_lang,
+                beam_size=beam_size,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+            segments_list = []
+            text_parts = []
+            for segment in segments_generator:
+                cleaned_text = segment.text.strip()
+                if cleaned_text:
+                    text_parts.append(cleaned_text)
+                    segments_list.append(
+                        {
+                            "start": segment.start,
+                            "end": segment.end,
+                            "text": cleaned_text,
+                            "avg_logprob": segment.avg_logprob,
+                            "no_speech_prob": segment.no_speech_prob,
+                        }
+                    )
+        except Exception as err:
+            logger.warning(
+                "Runtime error during Whisper transcription (%s). Retrying on CPU fallback.",
+                err,
+            )
+            self.model = WhisperModel(
+                model_size_or_path=self.model_size,
+                device="cpu",
+                compute_type="int8",
+            )
+            self.device = "cpu"
+            self.compute_type = "int8"
+            segments_generator, info = self.model.transcribe(
+                audio_input,
+                language=target_lang,
+                beam_size=beam_size,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+            segments_list = []
+            text_parts = []
+            for segment in segments_generator:
+                cleaned_text = segment.text.strip()
+                if cleaned_text:
+                    text_parts.append(cleaned_text)
+                    segments_list.append(
+                        {
+                            "start": segment.start,
+                            "end": segment.end,
+                            "text": cleaned_text,
+                            "avg_logprob": segment.avg_logprob,
+                            "no_speech_prob": segment.no_speech_prob,
+                        }
+                    )
 
         full_text = " ".join(text_parts).strip()
         elapsed = time.time() - start_t

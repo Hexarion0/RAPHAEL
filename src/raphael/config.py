@@ -44,7 +44,7 @@ class ProviderConfig(BaseModel):
 class AudioConfig(BaseModel):
     """Audio, wake word, and speech-to-text settings."""
 
-    wake_word: str = Field(default="raphael", description="Wake word trigger phrase")
+    wake_word: str = Field(default="hey raphael", description="Wake word trigger phrase")
     wake_threshold: float = Field(
         default=0.5,
         description="Wake word detection threshold (0.0 - 1.0)",
@@ -62,11 +62,11 @@ class AudioConfig(BaseModel):
         description="faster-whisper model size (e.g. tiny.en, base.en, small.en)",
     )
     stt_device: str = Field(
-        default="auto",
+        default="cpu",
         description="Inference device for whisper (cpu, cuda, auto)",
     )
     stt_compute_type: str = Field(
-        default="default",
+        default="int8",
         description="Compute precision (int8, float16, float32, default)",
     )
     stt_language: str = Field(
@@ -107,12 +107,12 @@ class Settings(BaseSettings):
     ollama_host: str = Field(default="http://localhost:11434")
 
     # Audio & Voice settings
-    wake_word: str = Field(default="raphael")
+    wake_word: str = Field(default="hey raphael")
     wake_threshold: float = Field(default=0.5)
     wake_cooldown: float = Field(default=2.0)
     stt_model: str = Field(default="base.en")
-    stt_device: str = Field(default="auto")
-    stt_compute_type: str = Field(default="default")
+    stt_device: str = Field(default="cpu")
+    stt_compute_type: str = Field(default="int8")
     stt_language: str = Field(default="en")
     audio_sample_rate: int = Field(default=16000)
     audio_channels: int = Field(default=1)

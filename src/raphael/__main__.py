@@ -42,9 +42,10 @@ def main() -> int:
         settings.audio.sample_rate,
     )
     logger.info(
-        "Wake Word: '%s' | STT Model: '%s'",
+        "Wake Word: '%s' | STT Model: '%s' (Device: %s)",
         settings.audio.wake_word,
         settings.audio.stt_model,
+        settings.audio.stt_device,
     )
 
     # Report provider configuration status safely (boolean status only, no keys printed)
@@ -62,6 +63,7 @@ def main() -> int:
     if args.listen:
         logger.info("Initializing wake-word and Whisper STT engine...")
         detector = WakeWordDetector(
+            wake_phrase=settings.audio.wake_word,
             models=settings.audio.wake_models,
             threshold=settings.audio.wake_threshold,
             cooldown_seconds=settings.audio.wake_cooldown,
@@ -93,7 +95,10 @@ def main() -> int:
         )
 
         loop.start()
-        logger.info("Awaiting wake word... Say 'Hey Jarvis' or 'Alexa' followed by your question.")
+        logger.info(
+            "Awaiting wake word... Say '%s' (or 'Hey Jarvis' / 'Alexa') followed by your question.",
+            settings.audio.wake_word.title(),
+        )
         try:
             while True:
                 time.sleep(0.5)
@@ -102,7 +107,7 @@ def main() -> int:
             logger.info("Wake listener terminated cleanly.")
             return 0
 
-    logger.info("Ready. Use '--listen' for live voice listening. (Milestone 1.3: Speech-to-Text)")
+    logger.info("Ready. Use '--listen' for live voice listening.")
     return 0
 
 
