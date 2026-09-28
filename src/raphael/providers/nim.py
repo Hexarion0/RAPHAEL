@@ -63,6 +63,8 @@ class NimProvider(LLMProvider):
             logger.debug("NIM health check failed: %s", err)
             return False
 
+    RELIABLE_BACKUP_MODEL: str = "meta/llama-3.2-11b-vision-instruct"
+
     def send(
         self,
         messages: list[ChatMessage] | str,
@@ -71,7 +73,7 @@ class NimProvider(LLMProvider):
         max_tokens: int = 1024,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Send chat messages to NVIDIA NIM."""
+        """Send chat messages to NVIDIA NIM with automatic model fallback on server errors."""
         msgs = self.normalize_messages(messages)
         target_model = model or self.default_model
 
@@ -86,12 +88,40 @@ class NimProvider(LLMProvider):
 
         start_t = time.time()
         with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._get_headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
+            try:
+                resp = client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=self._get_headers(),
+                    json=payload,
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as err:
+                # If primary model is overloaded (503/504) or unavailable (404), fallback to 11B
+                if target_model != self.RELIABLE_BACKUP_MODEL and err.response.status_code in (
+                    404,
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                ):
+                    logger.warning(
+                        "NIM model '%s' returned HTTP %d. Retrying with reliable backup '%s'...",
+                        target_model,
+                        err.response.status_code,
+                        self.RELIABLE_BACKUP_MODEL,
+                    )
+                    payload["model"] = self.RELIABLE_BACKUP_MODEL
+                    resp = client.post(
+                        f"{self.base_url}/chat/completions",
+                        headers=self._get_headers(),
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    target_model = self.RELIABLE_BACKUP_MODEL
+                else:
+                    raise
+
             data = resp.json()
 
         latency = time.time() - start_t
@@ -129,35 +159,86 @@ class NimProvider(LLMProvider):
         }
 
         with httpx.Client(timeout=self.timeout) as client:
-            with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers=self._get_headers(),
-                json=payload,
-            ) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data_str = line[len("data:") :].strip()
-                    if data_str == "[DONE]":
-                        yield LLMStreamChunk(
-                            delta="",
-                            model=target_model,
-                            provider=self.name,
-                            is_final=True,
-                        )
-                        break
-                    try:
-                        chunk_json = json.loads(data_str)
-                        delta = chunk_json["choices"][0]["delta"].get("content", "")
-                        if delta:
+            try:
+                with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=self._get_headers(),
+                    json=payload,
+                ) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_str = line[len("data:") :].strip()
+                        if data_str == "[DONE]":
                             yield LLMStreamChunk(
-                                delta=delta,
+                                delta="",
                                 model=target_model,
                                 provider=self.name,
-                                is_final=False,
+                                is_final=True,
                             )
-                    except json.JSONDecodeError:
-                        continue
+                            break
+                        try:
+                            chunk_json = json.loads(data_str)
+                            delta = chunk_json["choices"][0]["delta"].get("content", "")
+                            if delta:
+                                yield LLMStreamChunk(
+                                    delta=delta,
+                                    model=target_model,
+                                    provider=self.name,
+                                    is_final=False,
+                                )
+                        except json.JSONDecodeError:
+                            continue
+            except httpx.HTTPStatusError as err:
+                if target_model != self.RELIABLE_BACKUP_MODEL and err.response.status_code in (
+                    404,
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                ):
+                    logger.warning(
+                        "NIM streaming with '%s' failed (HTTP %d). Falling back to '%s'...",
+                        target_model,
+                        err.response.status_code,
+                        self.RELIABLE_BACKUP_MODEL,
+                    )
+                    payload["model"] = self.RELIABLE_BACKUP_MODEL
+                    with client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers=self._get_headers(),
+                        json=payload,
+                    ) as response:
+                        response.raise_for_status()
+                        for line in response.iter_lines():
+                            line = line.strip()
+                            if not line or not line.startswith("data:"):
+                                continue
+                            data_str = line[len("data:") :].strip()
+                            if data_str == "[DONE]":
+                                yield LLMStreamChunk(
+                                    delta="",
+                                    model=self.RELIABLE_BACKUP_MODEL,
+                                    provider=self.name,
+                                    is_final=True,
+                                )
+                                break
+                            try:
+                                chunk_json = json.loads(data_str)
+                                delta = chunk_json["choices"][0]["delta"].get("content", "")
+                                if delta:
+                                    yield LLMStreamChunk(
+                                        delta=delta,
+                                        model=self.RELIABLE_BACKUP_MODEL,
+                                        provider=self.name,
+                                        is_final=False,
+                                    )
+                            except json.JSONDecodeError:
+                                continue
+                else:
+                    raise
