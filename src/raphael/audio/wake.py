@@ -20,12 +20,13 @@ logger = get_logger("audio.wake")
 class WakeWordDetector:
     """Real-time streaming wake word detection supporting openWakeWord and keyword spotting."""
 
-    # Regex patterns to strictly match wake phrases as distinct words
+    # Regex patterns to match wake phrases and natural phonetic variations
     WAKE_PATTERNS = [
-        re.compile(r"\b(hey\s+)?raphael\b", re.IGNORECASE),
-        re.compile(r"\b(hey\s+)?rafael\b", re.IGNORECASE),
-        re.compile(r"\b(hey\s+)?raphel\b", re.IGNORECASE),
-        re.compile(r"\b(hey\s+)?rafeal\b", re.IGNORECASE),
+        re.compile(
+            r"\b(hey|hi|yo|a|okay|ok)?\s*(raphael|rafael|raphel|rafeal|raffael|refael|raph|ralph|raffaele)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(r"\b(hey\s+)?(raf|raph)\b", re.IGNORECASE),
     ]
 
     def __init__(
@@ -33,7 +34,7 @@ class WakeWordDetector:
         wake_phrase: str = "hey raphael",
         models: list[str] | None = None,
         threshold: float = 0.5,
-        cooldown_seconds: float = 2.0,
+        cooldown_seconds: float = 1.0,
         enable_whisper_spotter: bool = True,
     ) -> None:
         self.wake_phrase = wake_phrase.lower()
@@ -154,18 +155,18 @@ class WakeWordDetector:
             if chunk_rms < 0.03:
                 self._ambient_rms = 0.95 * self._ambient_rms + 0.05 * chunk_rms
 
-            # Detect voice energy burst
-            is_speech = chunk_rms > max(0.025, self._ambient_rms * 2.2)
+            # Detect voice energy burst with adaptive threshold
+            is_speech = chunk_rms > max(0.012, self._ambient_rms * 1.5)
             if is_speech:
                 self._speech_frames_count += 1
             else:
                 self._speech_frames_count = max(0, self._speech_frames_count - 1)
 
-            # Check Whisper when speech has accumulated (~0.4s to 0.8s)
+            # Check Whisper when speech has accumulated (~0.2s to 0.5s)
             if (
-                self._speech_frames_count >= 5
-                and len(self._sliding_buffer) >= 12800
-                and (now - self._last_spotter_check >= 0.45)
+                self._speech_frames_count >= 2
+                and len(self._sliding_buffer) >= 8000
+                and (now - self._last_spotter_check >= 0.25)
             ):
                 self._last_spotter_check = now
                 buffer_array = np.array(self._sliding_buffer, dtype=np.float32)
@@ -175,6 +176,7 @@ class WakeWordDetector:
                         buffer_array,
                         language="en",
                         beam_size=1,
+                        initial_prompt="Hey Raphael, Rafael",
                         without_timestamps=True,
                     )
                     transcription = " ".join(s.text.strip() for s in segments)

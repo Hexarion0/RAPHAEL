@@ -21,11 +21,13 @@ class SpeechToText:
         device: str = "cpu",
         compute_type: str = "int8",
         language: str = "en",
+        initial_prompt: str = "Hey Raphael, questions, commands, and conversational dialogue.",
     ) -> None:
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        self.initial_prompt = initial_prompt
 
         logger.info(
             "Loading faster-whisper STT model: '%s' (device=%s, compute_type=%s)",
@@ -99,8 +101,8 @@ class SpeechToText:
                 audio_input,
                 language=target_lang,
                 beam_size=beam_size,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500),
+                initial_prompt=self.initial_prompt,
+                vad_filter=False,
             )
             segments_list = []
             text_parts = []
@@ -133,8 +135,8 @@ class SpeechToText:
                 audio_input,
                 language=target_lang,
                 beam_size=beam_size,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500),
+                initial_prompt=self.initial_prompt,
+                vad_filter=False,
             )
             segments_list = []
             text_parts = []
