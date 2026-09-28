@@ -41,6 +41,7 @@ class WakeListenerLoop:
         on_wake: Callable[[dict[str, Any]], None] | None = None,
         on_utterance: Callable[[np.ndarray, dict[str, Any]], None] | None = None,
         on_transcription: Callable[[str, dict[str, Any], np.ndarray], bool | None] | None = None,
+        on_barge_in: Callable[[], None] | None = None,
         on_state_change: Callable[[ListenerState], None] | None = None,
         sample_rate: int = 16000,
         device: int | str | None = None,
@@ -55,6 +56,7 @@ class WakeListenerLoop:
         self.on_wake = on_wake
         self.on_utterance = on_utterance
         self.on_transcription = on_transcription
+        self.on_barge_in = on_barge_in
         self.on_state_change = on_state_change
         self.sample_rate = sample_rate
         self.device = device
@@ -146,8 +148,20 @@ class WakeListenerLoop:
                 rms = VoiceRecorder.calculate_rms(indata)
                 # If speech energy threshold exceeded or wake word detected while speaking
                 if rms >= self.barge_in_threshold_rms or self.detector.process_frame(indata):
-                    logger.info("🛑 Barge-in! Stopping speech and listening to user...")
+                    logger.info("🛑 Barge-in! Stopping all playback and listening...")
                     self.tts.stop()
+                    # Clear pending background processing queue
+                    while not self._processing_queue.empty():
+                        try:
+                            self._processing_queue.get_nowait()
+                            self._processing_queue.task_done()
+                        except queue.Empty:
+                            break
+                    if self.on_barge_in:
+                        try:
+                            self.on_barge_in()
+                        except Exception as err:
+                            logger.error("Error in on_barge_in callback: %s", err)
                     self.recorder.start()
                     self._set_state(ListenerState.RECORDING)
                     return

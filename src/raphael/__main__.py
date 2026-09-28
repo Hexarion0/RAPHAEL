@@ -196,8 +196,8 @@ def main() -> int:
 
             # Check if user requested pause / wait
             if _wait_re.search(cleaned_query):
-                logger.info("⏸️ Pause requested ('%s') — standing by.", cleaned_query)
-                tts.speak("Standing by.", block=True)
+                logger.info("⏸️ Pause requested ('%s') — saying 'Hmm?'", cleaned_query)
+                tts.speak("Hmm?", block=True)
                 _in_followup[0] = True
                 return True
 
@@ -257,6 +257,10 @@ def main() -> int:
                 tts.speak(error_msg, block=True)
                 return True  # Stay in conversation despite transient error
 
+        def on_barge_in():
+            logger.info("🛑 Barge-in triggered: audio stopped, listening...")
+            _in_followup[0] = True
+
         loop = WakeListenerLoop(
             audio_backend=audio_backend,
             detector=detector,
@@ -264,6 +268,7 @@ def main() -> int:
             tts=tts,
             on_wake=on_wake,
             on_transcription=on_transcription,
+            on_barge_in=on_barge_in,
             sample_rate=settings.audio.sample_rate,
             device=settings.audio.input_device,
             barge_in=True,
