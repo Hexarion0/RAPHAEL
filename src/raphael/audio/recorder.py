@@ -16,7 +16,7 @@ class VoiceRecorder:
         self,
         sample_rate: int = 16000,
         silence_threshold_rms: float = 0.015,
-        silence_duration_seconds: float = 1.2,
+        silence_duration_seconds: float = 1.5,
         min_speech_duration_seconds: float = 0.5,
         max_duration_seconds: float = 10.0,
         initial_silence_timeout: float = 6.0,
