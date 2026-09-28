@@ -136,3 +136,42 @@ def test_wake_listener_loop_state_transitions():
     loop.stop()
     assert loop.state == ListenerState.IDLE
     assert not backend.is_streaming()
+
+
+def test_wake_listener_barge_in_interruption():
+    """Verify that speech during TTS playback triggers immediate barge-in stop."""
+    backend = MockAudioBackend()
+
+    class MockTTS:
+        def __init__(self):
+            self._speaking = True
+            self.stopped = False
+
+        def is_speaking(self) -> bool:
+            return self._speaking
+
+        def stop(self) -> None:
+            self._speaking = False
+            self.stopped = True
+
+    mock_tts = MockTTS()
+    loop = WakeListenerLoop(
+        audio_backend=backend,
+        tts=mock_tts,
+        barge_in=True,
+        barge_in_threshold_rms=0.01,
+    )
+    loop.start()
+
+    # Create high-energy speech frame to trigger barge-in
+    t = np.linspace(0, 0.08, 1280, endpoint=False)
+    speech_frame = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+    # Trigger audio callback directly
+    backend.callback(speech_frame, 1280, None, None)
+
+    # Verify TTS was stopped and loop switched to recording
+    assert mock_tts.stopped is True
+    assert loop.state == ListenerState.RECORDING
+
+    loop.stop()

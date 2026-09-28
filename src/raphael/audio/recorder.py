@@ -60,12 +60,7 @@ class VoiceRecorder:
         now = time.time()
 
         # Calculate frame RMS
-        if np.issubdtype(frame.dtype, np.floating):
-            float_frame = frame
-        else:
-            float_frame = frame.astype(np.float32) / 32768.0
-
-        rms = float(np.sqrt(np.mean(float_frame**2))) if float_frame.size > 0 else 0.0
+        rms = self.calculate_rms(frame)
 
         # Check speech presence
         if rms >= self.silence_threshold_rms:
@@ -122,3 +117,13 @@ class VoiceRecorder:
     def is_recording(self) -> bool:
         """Return True if currently active."""
         return self._is_recording
+
+    @staticmethod
+    def calculate_rms(frame: np.ndarray) -> float:
+        """Calculate Root Mean Square (RMS) energy level of an audio frame."""
+        sq = frame.squeeze()
+        if np.issubdtype(sq.dtype, np.floating):
+            float_frame = sq
+        else:
+            float_frame = sq.astype(np.float32) / 32768.0
+        return float(np.sqrt(np.mean(float_frame**2))) if float_frame.size > 0 else 0.0

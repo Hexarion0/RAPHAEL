@@ -153,6 +153,14 @@ def main() -> int:
             r"\b(bye|goodbye|good\s+night|goodnight|see\s+you|take\s+care|farewell|later|night)\b",
             re.IGNORECASE,
         )
+        _wait_re = re.compile(
+            r"^(wait|hold\s+on|hang\s+on|one\s+sec(ond)?|pause)[.?!]*$",
+            re.IGNORECASE,
+        )
+        _stop_re = re.compile(
+            r"^(stop|be\s+quiet|shut\s+up|never\s*mind|cancel)[.?!]*$",
+            re.IGNORECASE,
+        )
         _in_followup = [False]  # mutable flag shared across calls
 
         def on_wake(info: dict):
@@ -185,6 +193,20 @@ def main() -> int:
                 _in_followup[0] = True
                 tts.speak("Go ahead.", block=False)
                 return True
+
+            # Check if user requested pause / wait
+            if _wait_re.search(cleaned_query):
+                logger.info("⏸️ Pause requested ('%s') — standing by.", cleaned_query)
+                tts.speak("Standing by.", block=True)
+                _in_followup[0] = True
+                return True
+
+            # Check if user requested immediate stop / cancel
+            if _stop_re.search(cleaned_query):
+                logger.info("🛑 Stop requested ('%s') — returning to standby.", cleaned_query)
+                tts.speak("Understood.", block=True)
+                _in_followup[0] = False
+                return False
 
             # Check for farewell in the user's query before calling the AI
             if _farewell_re.search(cleaned_query):
@@ -239,10 +261,12 @@ def main() -> int:
             audio_backend=audio_backend,
             detector=detector,
             stt=stt,
+            tts=tts,
             on_wake=on_wake,
             on_transcription=on_transcription,
             sample_rate=settings.audio.sample_rate,
             device=settings.audio.input_device,
+            barge_in=True,
         )
 
         loop.start()
