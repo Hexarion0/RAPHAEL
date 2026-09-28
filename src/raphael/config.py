@@ -54,8 +54,8 @@ class AudioConfig(BaseModel):
         description="Cooldown seconds after wake trigger",
     )
     wake_models: list[str] = Field(
-        default_factory=lambda: ["hey_jarvis", "alexa"],
-        description="List of openWakeWord model names or custom model paths",
+        default_factory=list,
+        description="openWakeWord model names/paths (empty = Whisper-only keyword spotter)",
     )
     stt_model: str = Field(
         default="base.en",
