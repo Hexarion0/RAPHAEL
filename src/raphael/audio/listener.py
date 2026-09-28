@@ -144,7 +144,12 @@ class WakeListenerLoop:
 
         with self._lock:
             # 1. Real-time Barge-In Interruption Check
-            if self.barge_in and self.tts and self.tts.is_speaking():
+            if (
+                self.barge_in
+                and self.tts
+                and self.tts.is_speaking()
+                and self._state != ListenerState.RECORDING
+            ):
                 rms = VoiceRecorder.calculate_rms(indata)
                 # If speech energy threshold exceeded or wake word detected while speaking
                 if rms >= self.barge_in_threshold_rms or self.detector.process_frame(indata):
