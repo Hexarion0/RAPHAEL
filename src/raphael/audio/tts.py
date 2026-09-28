@@ -40,6 +40,15 @@ class TextToSpeech:
 
     def _ensure_model_files(self) -> tuple[Path, Path]:
         """Ensure voice model .onnx and .onnx.json files exist locally, downloading if necessary."""
+        # 1. Check if direct file path was provided
+        direct_path = Path(self.voice_name)
+        if direct_path.is_file() and direct_path.suffix == ".onnx":
+            json_file = direct_path.with_suffix(".onnx.json")
+            if not json_file.is_file():
+                json_file = direct_path.with_name(f"{direct_path.stem}.json")
+            return direct_path, json_file
+
+        # 2. Check in models directory
         self.models_dir.mkdir(parents=True, exist_ok=True)
         onnx_file = self.models_dir / f"{self.voice_name}.onnx"
         json_file = self.models_dir / f"{self.voice_name}.onnx.json"
