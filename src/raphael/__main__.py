@@ -27,8 +27,8 @@ def main() -> int:
         "command",
         nargs="?",
         default="run",
-        choices=["run", "listen", "record-samples", "train-wake"],
-        help="Command to run: 'run' (default), 'listen', 'record-samples', 'train-wake'",
+        choices=["run", "listen", "setup", "record-samples", "train-wake"],
+        help="Command to run: 'run' (default), 'listen', 'setup', 'record-samples', 'train-wake'",
     )
     parser.add_argument(
         "--listen",
@@ -48,6 +48,13 @@ def main() -> int:
         help="Target wake phrase to train (default: 'Hey Raphael')",
     )
     args = parser.parse_args()
+
+    # If user ran `python -m raphael setup`
+    if args.command == "setup":
+        from raphael.setup_wizard import run_setup_wizard
+
+        run_setup_wizard()
+        return 0
 
     # If user ran `python -m raphael record-samples`
     if args.command == "record-samples":
