@@ -19,7 +19,7 @@ class VoiceRecorder:
         silence_duration_seconds: float = 1.5,
         min_speech_duration_seconds: float = 0.5,
         max_duration_seconds: float = 10.0,
-        initial_silence_timeout: float = 6.0,
+        initial_silence_timeout: float = 3.5,
     ) -> None:
         self.sample_rate = sample_rate
         self.silence_threshold_rms = silence_threshold_rms
@@ -73,11 +73,7 @@ class VoiceRecorder:
             # Silence observed
             if self._speech_started:
                 silence_elapsed = now - self._last_speech_time
-                speech_duration = self._last_speech_time - self._speech_start_time
-                if (
-                    silence_elapsed >= self.silence_duration_seconds
-                    and speech_duration >= self.min_speech_duration_seconds
-                ):
+                if silence_elapsed >= self.silence_duration_seconds:
                     logger.info(
                         "Silence detected after speech (%.1fs). Concluding utterance.",
                         silence_elapsed,

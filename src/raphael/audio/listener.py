@@ -184,6 +184,19 @@ class WakeListenerLoop:
                     self._set_state(ListenerState.RECORDING)
 
             elif self._state == ListenerState.RECORDING:
+                # If user hasn't started speaking query yet, check if wake word is being repeated
+                if not self.recorder._speech_started:
+                    trigger = self.detector.process_frame(indata)
+                    if trigger:
+                        self._last_wake_info = trigger
+                        if self.on_wake:
+                            try:
+                                self.on_wake(trigger)
+                            except Exception as err:
+                                logger.error("Error in on_wake callback: %s", err)
+                        self.recorder.start()
+                        return
+
                 continue_recording = self.recorder.add_frame(indata)
                 if not continue_recording:
                     self._set_state(ListenerState.PROCESSING)
