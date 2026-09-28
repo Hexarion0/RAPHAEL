@@ -74,12 +74,22 @@ class VoiceRecorder:
             if self._speech_started:
                 silence_elapsed = now - self._last_speech_time
                 if silence_elapsed >= self.silence_duration_seconds:
-                    logger.info(
-                        "Silence detected after speech (%.1fs). Concluding utterance.",
-                        silence_elapsed,
-                    )
-                    self._is_recording = False
-                    return False
+                    speech_duration = self._last_speech_time - self._speech_start_time
+                    if speech_duration < self.min_speech_duration_seconds:
+                        # Transient sound (< min_speech_duration) — reset and keep listening
+                        logger.debug(
+                            "Transient sound ignored (%.2fs) — resuming wait for speech.",
+                            speech_duration,
+                        )
+                        self._speech_started = False
+                        self._start_time = now
+                    else:
+                        logger.info(
+                            "Silence detected after speech (%.1fs). Concluding utterance.",
+                            silence_elapsed,
+                        )
+                        self._is_recording = False
+                        return False
             else:
                 # User has not spoken since recording started
                 if (now - self._start_time) >= self.initial_silence_timeout:
