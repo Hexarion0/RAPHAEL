@@ -20,6 +20,20 @@ logger = get_logger("audio.wake")
 class WakeWordDetector:
     """Real-time streaming wake word detection supporting openWakeWord and keyword spotting."""
 
+    # Phonetic and spelling variants for Raphael
+    RAPHAEL_VARIANTS = [
+        "raphael",
+        "rafael",
+        "hey raphael",
+        "hey rafael",
+        "rafeal",
+        "raphel",
+        "raffaele",
+        "refael",
+        "hey rapha",
+        "rafa",
+    ]
+
     def __init__(
         self,
         wake_phrase: str = "hey raphael",
@@ -34,9 +48,16 @@ class WakeWordDetector:
         self.last_trigger_time = 0.0
         self.enable_whisper_spotter = enable_whisper_spotter
 
-        # Normalize target keywords (e.g. "raphael", "rafael", "hey raphael")
+        # Build search keywords
         clean_phrase = re.sub(r"[^\w\s]", "", self.wake_phrase)
-        self.keywords = [clean_phrase, clean_phrase.replace("ph", "f"), "raphael", "rafael"]
+        combined_keywords = [
+            clean_phrase,
+            clean_phrase.replace("ph", "f"),
+            "raphael",
+            "rafael",
+            *self.RAPHAEL_VARIANTS,
+        ]
+        self.keywords = list(set(combined_keywords))
 
         model_paths = self._resolve_model_paths(models)
 
@@ -53,9 +74,11 @@ class WakeWordDetector:
             self.model = None
             self.available_models = []
 
-        # Sliding audio buffer for keyword spotting (1.5 seconds at 16kHz = 24,000 samples)
-        self._sliding_buffer: deque = deque(maxlen=24000)
+        # Sliding audio buffer for keyword spotting (1.2 seconds at 16kHz = 19,200 samples)
+        self._sliding_buffer: deque = deque(maxlen=19200)
+        self._speech_frames_count = 0
         self._last_spotter_check = 0.0
+        self._ambient_rms = 0.01
         self._spotter_model: WhisperModel | None = None
 
         if self.enable_whisper_spotter:
@@ -122,7 +145,7 @@ class WakeWordDetector:
 
         now = time.time()
 
-        # 1. Check openWakeWord models if loaded
+        # 1. Check openWakeWord models (e.g. hey_jarvis, alexa)
         if self.model is not None:
             predictions = self.model.predict(pcm16_chunk)
             for model_name, score in predictions.items():
@@ -137,53 +160,69 @@ class WakeWordDetector:
                         score,
                     )
                     self._sliding_buffer.clear()
+                    self._speech_frames_count = 0
                     return {
                         "model": model_name,
                         "score": float(score),
                         "timestamp": now,
                     }
 
-        # 2. Check keyword spotter for "Hey Raphael" / "Raphael"
+        # 2. Check keyword spotter for "Raphael" / "Hey Raphael"
         if self._spotter_model is not None:
             self._sliding_buffer.extend(float_chunk)
 
-            # Check every 0.35 seconds once buffer has at least 0.8s (12,800 samples)
-            if (now - self._last_spotter_check >= 0.35) and len(self._sliding_buffer) >= 12800:
+            chunk_rms = float(np.sqrt(np.mean(float_chunk**2))) if float_chunk.size > 0 else 0.0
+
+            # Update rolling ambient noise estimate
+            if chunk_rms < 0.03:
+                self._ambient_rms = 0.95 * self._ambient_rms + 0.05 * chunk_rms
+
+            # Detect active speech chunk
+            is_speech = chunk_rms > max(0.025, self._ambient_rms * 2.0)
+            if is_speech:
+                self._speech_frames_count += 1
+            else:
+                self._speech_frames_count = max(0, self._speech_frames_count - 1)
+
+            # Trigger Whisper check only when speech is sustained
+            if (
+                self._speech_frames_count >= 5
+                and len(self._sliding_buffer) >= 12800
+                and (now - self._last_spotter_check >= 0.4)
+            ):
                 self._last_spotter_check = now
                 buffer_array = np.array(self._sliding_buffer, dtype=np.float32)
-                rms = float(np.sqrt(np.mean(buffer_array**2)))
 
-                # Only run if speech energy is present
-                if rms >= 0.015:
-                    try:
-                        segments, _ = self._spotter_model.transcribe(
-                            buffer_array,
-                            language="en",
-                            beam_size=1,
-                            without_timestamps=True,
-                        )
-                        transcription = " ".join(s.text.strip().lower() for s in segments)
-                        cleaned = re.sub(r"[^\w\s]", "", transcription)
+                try:
+                    segments, _ = self._spotter_model.transcribe(
+                        buffer_array,
+                        language="en",
+                        beam_size=1,
+                        without_timestamps=True,
+                    )
+                    transcription = " ".join(s.text.strip().lower() for s in segments)
+                    cleaned = re.sub(r"[^\w\s]", "", transcription).strip()
 
-                        for kw in self.keywords:
-                            if kw in cleaned:
-                                if self.is_in_cooldown():
-                                    return None
+                    for kw in self.keywords:
+                        if kw in cleaned:
+                            if self.is_in_cooldown():
+                                return None
 
-                                self.last_trigger_time = now
-                                logger.info(
-                                    "🎯 Wake word '%s' detected! (Transcription: '%s')",
-                                    self.wake_phrase,
-                                    transcription,
-                                )
-                                self._sliding_buffer.clear()
-                                return {
-                                    "model": f"keyword_{self.wake_phrase.replace(' ', '_')}",
-                                    "score": 0.95,
-                                    "timestamp": now,
-                                }
-                    except Exception as err:
-                        logger.debug("Keyword spotter check error: %s", err)
+                            self.last_trigger_time = now
+                            logger.info(
+                                "🎯 Wake word '%s' detected! (Transcription: '%s')",
+                                self.wake_phrase,
+                                transcription,
+                            )
+                            self._sliding_buffer.clear()
+                            self._speech_frames_count = 0
+                            return {
+                                "model": f"keyword_{self.wake_phrase.replace(' ', '_')}",
+                                "score": 0.95,
+                                "timestamp": now,
+                            }
+                except Exception as err:
+                    logger.debug("Keyword spotter check error: %s", err)
 
         return None
 
@@ -192,4 +231,5 @@ class WakeWordDetector:
         if self.model is not None:
             self.model.reset()
         self._sliding_buffer.clear()
+        self._speech_frames_count = 0
         self.last_trigger_time = 0.0

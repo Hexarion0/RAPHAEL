@@ -69,10 +69,12 @@ def setup_logging(log_level: str | None = None) -> logging.Logger:
 
     root_logger.addHandler(console_handler)
 
-    # Silence overly verbose external libraries if needed
+    # Silence verbose external libraries
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+    logging.getLogger("ctranslate2").setLevel(logging.WARNING)
 
     logger = logging.getLogger("raphael")
     return logger
