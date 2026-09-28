@@ -36,6 +36,26 @@ class ProviderManager:
         """Get provider by name."""
         return self.providers.get(name.lower())
 
+    @property
+    def nim(self) -> LLMProvider:
+        """NVIDIA NIM provider instance."""
+        return self.providers["nim"]
+
+    @property
+    def groq(self) -> LLMProvider:
+        """Groq provider instance."""
+        return self.providers["groq"]
+
+    @property
+    def openrouter(self) -> LLMProvider:
+        """OpenRouter provider instance."""
+        return self.providers["openrouter"]
+
+    @property
+    def ollama(self) -> LLMProvider:
+        """Local Ollama provider instance."""
+        return self.providers["ollama"]
+
     def get_provider_statuses(self) -> dict[str, str]:
         """Check and return status for all registered providers."""
         statuses: dict[str, str] = {}

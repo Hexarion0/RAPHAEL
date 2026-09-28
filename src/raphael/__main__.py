@@ -67,7 +67,7 @@ def main() -> int:
     logger = setup_logging(settings.app.log_level)
 
     logger.info("==========================================")
-    logger.info("   RAPHAEL - Desktop AI Assistant v0.1.0  ")
+    logger.info("   RAPHAEL - Desktop AI Assistant v0.2.0  ")
     logger.info("==========================================")
     logger.info("Environment: %s | Log Level: %s", settings.app.env, settings.app.log_level)
 
