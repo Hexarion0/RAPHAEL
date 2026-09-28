@@ -73,6 +73,18 @@ class AudioConfig(BaseModel):
         default="en",
         description="Primary language code for STT transcription",
     )
+    tts_voice: str = Field(
+        default="en_GB-alan-medium",
+        description="Piper TTS voice model name (e.g. en_GB-alan-medium, en_US-lessac-medium)",
+    )
+    tts_speed: float = Field(
+        default=1.0,
+        description="Speech synthesis speed multiplier (1.0 = normal)",
+    )
+    tts_enabled: bool = Field(
+        default=True,
+        description="Enable speech synthesis voice output",
+    )
     sample_rate: int = Field(default=16000, description="Audio sample rate in Hz")
     channels: int = Field(default=1, description="Audio channel count (1 for mono)")
     input_device: int | str | None = Field(
@@ -114,6 +126,9 @@ class Settings(BaseSettings):
     stt_device: str = Field(default="cpu")
     stt_compute_type: str = Field(default="int8")
     stt_language: str = Field(default="en")
+    tts_voice: str = Field(default="en_GB-alan-medium")
+    tts_speed: float = Field(default=1.0)
+    tts_enabled: bool = Field(default=True)
     audio_sample_rate: int = Field(default=16000)
     audio_channels: int = Field(default=1)
     audio_input_device: int | str | None = Field(default=None)
@@ -149,6 +164,9 @@ class Settings(BaseSettings):
             stt_device=self.stt_device,
             stt_compute_type=self.stt_compute_type,
             stt_language=self.stt_language,
+            tts_voice=self.tts_voice,
+            tts_speed=self.tts_speed,
+            tts_enabled=self.tts_enabled,
             sample_rate=self.audio_sample_rate,
             channels=self.audio_channels,
             input_device=self.audio_input_device,

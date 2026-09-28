@@ -8,12 +8,19 @@ from raphael.providers.manager import ProviderManager
 from raphael.providers.nim import NimProvider
 from raphael.providers.ollama import OllamaProvider
 from raphael.providers.openrouter import OpenRouterProvider
+from raphael.providers.router import ComplexityLevel, ModelRouter, RoutingDecision
 
 
 @lru_cache(maxsize=1)
 def get_provider_manager() -> ProviderManager:
     """Return the global cached ProviderManager instance."""
     return ProviderManager()
+
+
+@lru_cache(maxsize=1)
+def get_model_router() -> ModelRouter:
+    """Return the global cached ModelRouter instance."""
+    return ModelRouter()
 
 
 __all__ = [
@@ -27,4 +34,8 @@ __all__ = [
     "OllamaProvider",
     "ProviderManager",
     "get_provider_manager",
+    "ComplexityLevel",
+    "RoutingDecision",
+    "ModelRouter",
+    "get_model_router",
 ]

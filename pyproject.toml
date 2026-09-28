@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "raphael"
-version = "0.1.0"
+version = "0.2.0"
 description = "A JARVIS-style, always-listening desktop AI assistant"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,7 @@ dependencies = [
     "openwakeword>=0.4.0",
     "onnxruntime>=1.15.0",
     "faster-whisper>=1.0.0",
+    "piper-tts>=1.8.0",
     "httpx>=0.24.0",
 ]
 

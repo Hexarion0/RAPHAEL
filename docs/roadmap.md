@@ -390,7 +390,7 @@ Complex:
 "Analyze this Python architecture and redesign it."
 ```
 
-- [ ] Define simple/medium/complex examples for calibration
+- [x] Define simple/medium/complex examples for calibration
 
 #### 1.5.2 Create Router
 
@@ -406,12 +406,12 @@ Complexity classifier
 └───────────────┘
 ```
 
-- [ ] Build the complexity classifier
-- [ ] Route simple → fast model, medium → normal model, complex → strong model
+- [x] Build the complexity classifier
+- [x] Route simple → fast model, medium → normal model, complex → strong model
 
 #### 1.5.3 Manual Override
 
-- [ ] Support internal overrides such as `/fast`, `/strong`, `/local`
+- [x] Support internal overrides such as `/fast`, `/strong`, `/local`
 
 #### 1.5.4 Routing Logs
 
@@ -425,16 +425,16 @@ Model: <model>
 Reason: code analysis
 ```
 
-- [ ] Log request, complexity, provider, model, and reasoning for each routed call
+- [x] Log request, complexity, provider, model, and reasoning for each routed call
 
 #### 1.5.5 Refine
 
-- [ ] Measure latency
-- [ ] Measure response quality
-- [ ] Measure cost
-- [ ] Measure failure rate
-- [ ] Measure routing accuracy
-- [ ] Optimize using real usage data
+- [x] Measure latency
+- [x] Measure response quality
+- [x] Measure cost
+- [x] Measure failure rate
+- [x] Measure routing accuracy
+- [x] Optimize using real usage data
 
 ---
 
@@ -444,7 +444,7 @@ Use **Piper** initially.
 
 #### 1.6.1 Setup
 
-- [ ] Install Piper
+- [x] Install Piper
 
 #### 1.6.2 Generation
 
@@ -456,22 +456,22 @@ Use **Piper** initially.
  ".wav"
 ```
 
-- [ ] Generate speech from text via Piper
+- [x] Generate speech from text via Piper
 
 #### 1.6.3 Playback
 
-- [ ] Play responses automatically
+- [x] Play responses automatically
 
 #### 1.6.4 Voice Selection
 
-- [ ] Select RAPHAEL's voice
+- [x] Select RAPHAEL's voice
 
 #### 1.6.5 Tuning
 
-- [ ] Tune speed
-- [ ] Tune volume
-- [ ] Tune pitch where supported
-- [ ] Tune pauses
+- [x] Tune speed
+- [x] Tune volume
+- [x] Tune pitch where supported
+- [x] Tune pauses
 
 #### 1.6.6 Streaming Refine
 
@@ -485,7 +485,7 @@ TTS
 speaker
 ```
 
-- [ ] Stream response chunks to TTS instead of waiting for the full reply
+- [x] Stream response chunks to TTS instead of waiting for the full reply
 
 #### 1.6.7 Barge-In
 
@@ -500,7 +500,7 @@ RAPHAEL:
 [Stops speaking]
 ```
 
-- [ ] Allow the user to interrupt RAPHAEL mid-speech
+- [x] Allow the user to interrupt RAPHAEL mid-speech
 
 ---
 
@@ -532,32 +532,32 @@ Connect everything:
 
 #### 1.7.1 Run
 
-- [ ] Run the complete loop end-to-end
+- [x] Run the complete loop end-to-end
 
 #### 1.7.2 Context
 
-- [ ] Add conversation context
+- [x] Add conversation context
 
 #### 1.7.3 Interruption
 
-- [ ] Add interruption handling
+- [x] Add interruption handling
 
 #### 1.7.4 Failure Recovery
 
-- [ ] Add failure recovery
+- [x] Add failure recovery
 
 #### 1.7.5 Stress Test
 
-- [ ] Stress test extended sessions
+- [x] Stress test extended sessions
 
 #### 1.7.6 Final Refinement
 
-- [ ] Target low latency
-- [ ] Reliable wake detection
-- [ ] Clean transcription
-- [ ] Stable AI responses
-- [ ] Natural speech
-- [ ] Graceful failures
+- [x] Target low latency
+- [x] Reliable wake detection
+- [x] Clean transcription
+- [x] Stable AI responses
+- [x] Natural speech
+- [x] Graceful failures
 
 ---
 

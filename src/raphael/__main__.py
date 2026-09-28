@@ -1,11 +1,14 @@
 """Entry point for running RAPHAEL via `python -m raphael`."""
 
 import argparse
+import asyncio
+import re
 import sys
 import time
 
 from raphael.audio import (
     SpeechToText,
+    TextToSpeech,
     WakeListenerLoop,
     WakeWordDetector,
     record_voice_samples,
@@ -14,6 +17,7 @@ from raphael.audio import (
 from raphael.config import get_settings
 from raphael.logging import setup_logging
 from raphael.platform import get_audio_backend
+from raphael.providers import ChatMessage, get_model_router
 
 
 def main() -> int:
@@ -100,7 +104,7 @@ def main() -> int:
     )
 
     if args.listen or args.command == "listen":
-        logger.info("Initializing wake-word and Whisper STT engine...")
+        logger.info("Initializing wake-word, Whisper STT, and Piper TTS engines...")
         detector = WakeWordDetector(
             wake_phrase=settings.audio.wake_word,
             models=settings.audio.wake_models,
@@ -113,15 +117,79 @@ def main() -> int:
             compute_type=settings.audio.stt_compute_type,
             language=settings.audio.stt_language,
         )
+        tts = TextToSpeech(
+            voice_name=settings.audio.tts_voice,
+            speed=settings.audio.tts_speed,
+            output_device=settings.audio.output_device,
+            enabled=settings.audio.tts_enabled,
+        )
+        router = get_model_router()
+
+        system_prompt = (
+            "You are RAPHAEL, a sophisticated, concise, and loyal AI desktop assistant. "
+            "Respond conversationally and concisely (1 to 3 sentences maximum unless the user "
+            "explicitly asks for detailed explanations or code). Be helpful, witty, and direct. "
+            "Do not use markdown headers, bullet lists, or bold symbols in spoken responses."
+        )
+
+        conversation_history: list[ChatMessage] = [
+            ChatMessage(role="system", content=system_prompt)
+        ]
 
         def on_wake(info: dict):
             logger.info("🎯 Wake detected! Details: %s", info)
 
         def on_transcription(text: str, wake_info: dict, audio_data):
-            if text.strip():
-                logger.info('🗣️ You: "%s"', text.strip())
-            else:
-                logger.info("🗣️ (No clear speech detected in recording)")
+            user_text = text.strip()
+            if not user_text:
+                logger.info("🗣️ (No speech detected)")
+                return
+
+            logger.info('🗣️ You: "%s"', user_text)
+
+            # Clean wake phrase from user query
+            cleaned_query = re.sub(
+                r"^(hey\s+)?(raphael|rafael|raphel|rafeal)[,\s]*",
+                "",
+                user_text,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            if not cleaned_query:
+                # User just called the wake word
+                reply = "Yes, sir? How can I assist you?"
+                logger.info('🤖 RAPHAEL: "%s"', reply)
+                tts.speak(reply, block=True)
+                return
+
+            # Append user query and generate response
+            conversation_history.append(ChatMessage(role="user", content=cleaned_query))
+            # Keep history manageable (last 10 turns)
+            if len(conversation_history) > 12:
+                conversation_history[:] = [conversation_history[0]] + conversation_history[-10:]
+
+            try:
+                loop_async = asyncio.new_event_loop()
+                response = loop_async.run_until_complete(
+                    router.send(conversation_history, temperature=0.7, max_tokens=256)
+                )
+                loop_async.close()
+
+                reply_text = response.content.strip()
+                logger.info(
+                    '🤖 RAPHAEL: "%s" [%s/%s]',
+                    reply_text,
+                    response.provider,
+                    response.model,
+                )
+                conversation_history.append(ChatMessage(role="assistant", content=reply_text))
+
+                # Speak response out loud
+                tts.speak(reply_text, block=True)
+            except Exception as err:
+                logger.error("Error generating or speaking AI response: %s", err)
+                error_msg = "Apologies, sir. I encountered an error processing that request."
+                tts.speak(error_msg, block=True)
 
         loop = WakeListenerLoop(
             audio_backend=audio_backend,
