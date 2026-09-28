@@ -20,18 +20,12 @@ logger = get_logger("audio.wake")
 class WakeWordDetector:
     """Real-time streaming wake word detection supporting openWakeWord and keyword spotting."""
 
-    # Phonetic and spelling variants for Raphael
-    RAPHAEL_VARIANTS = [
-        "raphael",
-        "rafael",
-        "hey raphael",
-        "hey rafael",
-        "rafeal",
-        "raphel",
-        "raffaele",
-        "refael",
-        "hey rapha",
-        "rafa",
+    # Regex patterns to strictly match wake phrases as distinct words
+    WAKE_PATTERNS = [
+        re.compile(r"\b(hey\s+)?raphael\b", re.IGNORECASE),
+        re.compile(r"\b(hey\s+)?rafael\b", re.IGNORECASE),
+        re.compile(r"\b(hey\s+)?raphel\b", re.IGNORECASE),
+        re.compile(r"\b(hey\s+)?rafeal\b", re.IGNORECASE),
     ]
 
     def __init__(
@@ -48,17 +42,6 @@ class WakeWordDetector:
         self.last_trigger_time = 0.0
         self.enable_whisper_spotter = enable_whisper_spotter
 
-        # Build search keywords
-        clean_phrase = re.sub(r"[^\w\s]", "", self.wake_phrase)
-        combined_keywords = [
-            clean_phrase,
-            clean_phrase.replace("ph", "f"),
-            "raphael",
-            "rafael",
-            *self.RAPHAEL_VARIANTS,
-        ]
-        self.keywords = list(set(combined_keywords))
-
         model_paths = self._resolve_model_paths(models)
 
         logger.info("Initializing openWakeWord detector with models: %s", models)
@@ -74,8 +57,8 @@ class WakeWordDetector:
             self.model = None
             self.available_models = []
 
-        # Sliding audio buffer for keyword spotting (1.2 seconds at 16kHz = 19,200 samples)
-        self._sliding_buffer: deque = deque(maxlen=19200)
+        # Sliding audio buffer for keyword spotting (1.5 seconds at 16kHz = 24,000 samples)
+        self._sliding_buffer: deque = deque(maxlen=24000)
         self._speech_frames_count = 0
         self._last_spotter_check = 0.0
         self._ambient_rms = 0.01
@@ -91,20 +74,12 @@ class WakeWordDetector:
 
     @staticmethod
     def _resolve_model_paths(models: list[str] | None) -> list[str]:
-        """Resolve model names or filepaths to exact model paths."""
+        """Resolve model names to standard pretrained models (avoiding uncalibrated custom ones)."""
         pretrained_paths = openwakeword.get_pretrained_model_paths()
+        if not models:
+            return pretrained_paths
 
         resolved: list[str] = []
-
-        # Auto-load any custom models trained in models/custom/
-        custom_dir = Path("models/custom")
-        if custom_dir.exists():
-            for custom_model in custom_dir.glob("*.onnx"):
-                resolved.append(str(custom_model.resolve()))
-
-        if not models:
-            return resolved or pretrained_paths
-
         for requested in models:
             req_path = Path(requested)
             if req_path.is_file() and requested.endswith(".onnx"):
@@ -132,15 +107,8 @@ class WakeWordDetector:
         return (time.time() - self.last_trigger_time) < self.cooldown_seconds
 
     def process_frame(self, audio_chunk: np.ndarray) -> dict[str, Any] | None:
-        """Feed a mono 16kHz audio frame and check for wake word triggers.
-
-        Args:
-            audio_chunk: Audio array of shape (N,) or (N, 1). Float32 (-1..1) or Int16.
-
-        Returns:
-            Dictionary with trigger details if wake word is detected, otherwise None.
-        """
-        if audio_chunk.size == 0:
+        """Feed a mono 16kHz audio frame and check for wake word triggers."""
+        if audio_chunk.size == 0 or self.is_in_cooldown():
             return None
 
         # Format chunk to 1D float32 and 1D int16
@@ -158,17 +126,13 @@ class WakeWordDetector:
             predictions = self.model.predict(pcm16_chunk)
             for model_name, score in predictions.items():
                 if score >= self.threshold:
-                    if self.is_in_cooldown():
-                        return None
-
                     self.last_trigger_time = now
                     logger.info(
                         "🎯 Wake word detected via openWakeWord! Model: '%s' (Confidence: %.2f)",
                         model_name,
                         score,
                     )
-                    self._sliding_buffer.clear()
-                    self._speech_frames_count = 0
+                    self.reset(set_cooldown=True)
                     return {
                         "model": model_name,
                         "score": float(score),
@@ -181,22 +145,22 @@ class WakeWordDetector:
 
             chunk_rms = float(np.sqrt(np.mean(float_chunk**2))) if float_chunk.size > 0 else 0.0
 
-            # Update rolling ambient noise estimate
+            # Dynamic noise estimate
             if chunk_rms < 0.03:
                 self._ambient_rms = 0.95 * self._ambient_rms + 0.05 * chunk_rms
 
-            # Detect active speech chunk
-            is_speech = chunk_rms > max(0.025, self._ambient_rms * 2.0)
+            # Detect voice energy burst
+            is_speech = chunk_rms > max(0.025, self._ambient_rms * 2.2)
             if is_speech:
                 self._speech_frames_count += 1
             else:
                 self._speech_frames_count = max(0, self._speech_frames_count - 1)
 
-            # Trigger Whisper check only when speech is sustained
+            # Check Whisper when speech has accumulated (~0.4s to 0.8s)
             if (
                 self._speech_frames_count >= 5
                 and len(self._sliding_buffer) >= 12800
-                and (now - self._last_spotter_check >= 0.4)
+                and (now - self._last_spotter_check >= 0.45)
             ):
                 self._last_spotter_check = now
                 buffer_array = np.array(self._sliding_buffer, dtype=np.float32)
@@ -208,36 +172,38 @@ class WakeWordDetector:
                         beam_size=1,
                         without_timestamps=True,
                     )
-                    transcription = " ".join(s.text.strip().lower() for s in segments)
-                    cleaned = re.sub(r"[^\w\s]", "", transcription).strip()
+                    transcription = " ".join(s.text.strip() for s in segments)
 
-                    for kw in self.keywords:
-                        if kw in cleaned:
-                            if self.is_in_cooldown():
-                                return None
-
+                    for pattern in self.WAKE_PATTERNS:
+                        if pattern.search(transcription):
                             self.last_trigger_time = now
                             logger.info(
                                 "🎯 Wake word '%s' detected! (Transcription: '%s')",
                                 self.wake_phrase,
                                 transcription,
                             )
-                            self._sliding_buffer.clear()
-                            self._speech_frames_count = 0
+                            self.reset(set_cooldown=True)
                             return {
                                 "model": f"keyword_{self.wake_phrase.replace(' ', '_')}",
                                 "score": 0.95,
                                 "timestamp": now,
                             }
                 except Exception as err:
-                    logger.debug("Keyword spotter check error: %s", err)
+                    logger.debug("Keyword spotter error: %s", err)
 
         return None
 
-    def reset(self) -> None:
-        """Reset internal prediction buffers."""
+    def reset(self, set_cooldown: bool = False) -> None:
+        """Reset internal prediction buffers and optionally engage cooldown."""
         if self.model is not None:
             self.model.reset()
+            # Flush internal openwakeword buffers with zeros
+            silence = np.zeros(1280, dtype=np.int16)
+            for _ in range(8):
+                self.model.predict(silence)
+
         self._sliding_buffer.clear()
         self._speech_frames_count = 0
-        self.last_trigger_time = 0.0
+        self._last_spotter_check = time.time()
+        if set_cooldown:
+            self.last_trigger_time = time.time()

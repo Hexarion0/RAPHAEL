@@ -124,8 +124,8 @@ class WakeListenerLoop:
                         except Exception as err:
                             logger.error("STT transcription error: %s", err)
 
-                    # Reset detector and resume listening for wake word
-                    self.detector.reset()
+                    # Reset detector and resume listening for wake word with cooldown protection
+                    self.detector.reset(set_cooldown=True)
                     self._set_state(ListenerState.LISTENING_WAKE)
 
     def start(self) -> None:
