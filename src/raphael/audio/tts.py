@@ -1,7 +1,6 @@
 """Text-to-Speech (TTS) engine using Piper neural voice synthesis and sounddevice playback."""
 
 import re
-import threading
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +32,6 @@ class TextToSpeech:
         self.enabled = enabled
         self._voice: PiperVoice | None = None
         self._is_playing = False
-        self._playback_lock = threading.Lock()
 
         if self.enabled:
             self._load_voice()
@@ -145,28 +143,26 @@ class TextToSpeech:
 
         audio, sample_rate = synth_result
 
-        with self._playback_lock:
-            try:
-                self._is_playing = True
-                sd.play(audio, samplerate=sample_rate, device=self.output_device)
-                if block:
-                    sd.wait()
-                    self._is_playing = False
-                return True
-            except Exception as err:
-                logger.error("Error playing TTS audio: %s", err)
+        try:
+            self._is_playing = True
+            sd.play(audio, samplerate=sample_rate, device=self.output_device)
+            if block:
+                sd.wait()
                 self._is_playing = False
-                return False
+            return True
+        except Exception as err:
+            logger.error("Error playing TTS audio: %s", err)
+            self._is_playing = False
+            return False
 
     def stop(self) -> None:
         """Immediately stop audio playback (barge-in support)."""
-        with self._playback_lock:
-            try:
-                sd.stop()
-            except Exception as err:
-                logger.debug("Error stopping sounddevice: %s", err)
-            finally:
-                self._is_playing = False
+        try:
+            sd.stop()
+        except Exception as err:
+            logger.debug("Error stopping sounddevice: %s", err)
+        finally:
+            self._is_playing = False
 
     def is_speaking(self) -> bool:
         """Check whether audio is currently playing."""
