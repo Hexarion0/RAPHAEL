@@ -22,17 +22,17 @@ RAPHAEL/
 
 ### 0.2 Python Environment
 
-- [ ] 0.2.1 Create Python virtual environment
-- [ ] 0.2.2 Configure package/dependency management
-- [ ] 0.2.3 Add formatting/linting
-- [ ] 0.2.4 Add basic test framework
-- [ ] 0.2.5 Create `python -m raphael` entry point
+- [x] 0.2.1 Create Python virtual environment
+- [x] 0.2.2 Configure package/dependency management
+- [x] 0.2.3 Add formatting/linting
+- [x] 0.2.4 Add basic test framework
+- [x] 0.2.5 Create `python -m raphael` entry point
 
 ### 0.3 Configuration
 
-- [ ] 0.3.1 Create centralized configuration system
-- [ ] 0.3.2 Load secrets from environment variables
-- [ ] 0.3.3 Keep API keys and credentials out of Git
+- [x] 0.3.1 Create centralized configuration system
+- [x] 0.3.2 Load secrets from environment variables
+- [x] 0.3.3 Keep API keys and credentials out of Git
 
 Example:
 
@@ -48,10 +48,10 @@ GROQ_API_KEY=
 
 ### 0.4 Logging
 
-- [ ] 0.4.1 Create structured logging
-- [ ] 0.4.2 Add log levels
-- [ ] 0.4.3 Log provider/router/audio events
-- [ ] 0.4.4 Never log secrets or private data
+- [x] 0.4.1 Create structured logging
+- [x] 0.4.2 Add log levels
+- [x] 0.4.3 Log provider/router/audio events
+- [x] 0.4.4 Never log secrets or private data
 
 ### 0.5 Git Workflow
 
@@ -146,9 +146,9 @@ Use:
 
 #### 1.1.3 Device Discovery
 
-- [ ] List available microphones
-- [ ] Select default device
-- [ ] Allow manual device selection
+- [x] List available microphones
+- [x] Select default device
+- [x] Allow manual device selection
 
 #### 1.1.4 Recording
 
@@ -160,21 +160,21 @@ microphone → WAV
 
 #### 1.1.5 Test
 
-- [ ] Microphone works
-- [ ] Correct sample rate
-- [ ] Correct channels
-- [ ] Recording is not clipped
-- [ ] Recording is not silent
-- [ ] Saved audio plays correctly
+- [x] Microphone works
+- [x] Correct sample rate
+- [x] Correct channels
+- [x] Recording is not clipped
+- [x] Recording is not silent
+- [x] Saved audio plays correctly
 
 #### 1.1.6 Refine
 
-- [ ] Handle missing microphone
-- [ ] Handle microphone disconnect
-- [ ] Handle incorrect sample rate
-- [ ] Handle permission errors
-- [ ] Handle background noise
-- [ ] Handle device switching
+- [x] Handle missing microphone
+- [x] Handle microphone disconnect
+- [x] Handle incorrect sample rate
+- [x] Handle permission errors
+- [x] Handle background noise
+- [x] Handle device switching
 
 **Checkpoint:** RAPHAEL can reliably record your voice.
 

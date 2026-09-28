@@ -89,7 +89,7 @@ RAPHAEL is being built one feature at a time, fully refined before moving to the
 
 | Version | Milestone | Status |
 |---|---|---|
-| `v0.1` | Project foundation | ⬜ |
+| `v0.1` | Project foundation | ✅ |
 | `v0.2` | Core AI (wake word → STT → router → LLM → TTS) | ⬜ |
 | `v0.3` | Persistent memory | ⬜ |
 | `v0.4` | Skills and actions | ⬜ |
