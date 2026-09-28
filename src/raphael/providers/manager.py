@@ -1,0 +1,151 @@
+"""Multi-provider coordinator with automated fallback chain and health tracking."""
+
+from collections.abc import Iterator
+from typing import Any
+
+from raphael.logging import get_logger
+from raphael.providers.base import ChatMessage, LLMProvider, LLMResponse, LLMStreamChunk
+from raphael.providers.groq import GroqProvider
+from raphael.providers.nim import NimProvider
+from raphael.providers.ollama import OllamaProvider
+from raphael.providers.openrouter import OpenRouterProvider
+
+logger = get_logger("providers.manager")
+
+
+class ProviderManager:
+    """Manages AI provider clients, tracks their health, and executes the fallback chain."""
+
+    # Default fallback sequence: NIM -> Groq -> OpenRouter -> Local Ollama
+    DEFAULT_FALLBACK_CHAIN = ["nim", "groq", "openrouter", "ollama"]
+
+    def __init__(self, fallback_chain: list[str] | None = None) -> None:
+        self.fallback_chain = fallback_chain or self.DEFAULT_FALLBACK_CHAIN
+        self.providers: dict[str, LLMProvider] = {
+            "nim": NimProvider(),
+            "groq": GroqProvider(),
+            "openrouter": OpenRouterProvider(),
+            "ollama": OllamaProvider(),
+        }
+
+    def register_provider(self, name: str, provider: LLMProvider) -> None:
+        """Register or override a provider client."""
+        self.providers[name.lower()] = provider
+
+    def get_provider(self, name: str) -> LLMProvider | None:
+        """Get provider by name."""
+        return self.providers.get(name.lower())
+
+    def get_provider_statuses(self) -> dict[str, str]:
+        """Check and return status for all registered providers."""
+        statuses: dict[str, str] = {}
+        for name, provider in self.providers.items():
+            if not provider.is_configured():
+                statuses[name] = "not configured"
+            elif provider.health_check():
+                statuses[name] = "available"
+            else:
+                statuses[name] = "offline / unreachable"
+        return statuses
+
+    def get_first_available_provider(self) -> LLMProvider | None:
+        """Find the first configured and reachable provider in the fallback chain."""
+        for name in self.fallback_chain:
+            p = self.get_provider(name)
+            if p and p.is_configured():
+                return p
+        return None
+
+    def send_with_fallback(
+        self,
+        messages: list[ChatMessage] | str,
+        preferred_provider: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Send prompt attempting preferred provider first with automatic fallback."""
+        order: list[str] = []
+        if preferred_provider and preferred_provider.lower() in self.providers:
+            order.append(preferred_provider.lower())
+        for name in self.fallback_chain:
+            if name not in order and name in self.providers:
+                order.append(name)
+
+        last_error: Exception | None = None
+
+        for provider_name in order:
+            provider = self.providers[provider_name]
+            if not provider.is_configured():
+                logger.debug("Skipping provider '%s' (not configured).", provider_name)
+                continue
+
+            try:
+                logger.debug("Attempting inference with provider '%s'...", provider_name)
+                response = provider.send(
+                    messages=messages,
+                    model=model if (preferred_provider == provider_name) else None,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+                logger.info(
+                    "Successfully generated response via '%s' (model: %s, latency: %.2fs)",
+                    provider_name,
+                    response.model,
+                    response.latency,
+                )
+                return response
+            except Exception as err:
+                last_error = err
+                logger.warning(
+                    "Provider '%s' failed (%s). Triggering fallback chain.",
+                    provider_name,
+                    err,
+                )
+
+        error_msg = f"All AI providers in fallback chain failed. Last error: {last_error}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from last_error
+
+    def stream_with_fallback(
+        self,
+        messages: list[ChatMessage] | str,
+        preferred_provider: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs: Any,
+    ) -> Iterator[LLMStreamChunk]:
+        """Stream response from the first functioning provider."""
+        order: list[str] = []
+        if preferred_provider and preferred_provider.lower() in self.providers:
+            order.append(preferred_provider.lower())
+        for name in self.fallback_chain:
+            if name not in order and name in self.providers:
+                order.append(name)
+
+        for provider_name in order:
+            provider = self.providers[provider_name]
+            if not provider.is_configured():
+                continue
+
+            try:
+                logger.debug("Attempting stream with provider '%s'...", provider_name)
+                yield from provider.stream(
+                    messages=messages,
+                    model=model if (preferred_provider == provider_name) else None,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+                return
+            except Exception as err:
+                logger.warning(
+                    "Provider '%s' streaming failed: %s. Attempting fallback.",
+                    provider_name,
+                    err,
+                )
+
+        raise RuntimeError("All streaming providers in fallback chain failed.")

@@ -310,28 +310,28 @@ LLMProvider
 
 #### 1.4.1 NVIDIA NIM
 
-- [ ] Implement NIM client
-- [ ] Send prompt
-- [ ] Receive response
-- [ ] Handle authentication
+- [x] Implement NIM client
+- [x] Send prompt
+- [x] Receive response
+- [x] Handle authentication
 
 #### 1.4.2 OpenRouter
 
-- [ ] Implement OpenRouter client
-- [ ] Support model selection
-- [ ] Handle API errors
+- [x] Implement OpenRouter client
+- [x] Support model selection
+- [x] Handle API errors
 
 #### 1.4.3 Groq
 
-- [ ] Implement Groq client
-- [ ] Support fast models
-- [ ] Handle rate limits
+- [x] Implement Groq client
+- [x] Support fast models
+- [x] Handle rate limits
 
 #### 1.4.4 Ollama
 
-- [ ] Implement Ollama client
-- [ ] Detect local availability
-- [ ] Support offline fallback
+- [x] Implement Ollama client
+- [x] Detect local availability
+- [x] Support offline fallback
 
 #### 1.4.5 Provider Manager
 
@@ -344,7 +344,7 @@ OpenRouter → unavailable
 Ollama     → available
 ```
 
-- [ ] Track provider availability state
+- [x] Track provider availability state
 
 #### 1.4.6 Failure Handling
 
@@ -358,16 +358,16 @@ Ollama
 response
 ```
 
-- [ ] Implement the NIM → Groq → Ollama fallback chain
+- [x] Implement the NIM → Groq → Ollama fallback chain
 
 #### 1.4.7 Refine
 
-- [ ] Timeouts
-- [ ] Retries
-- [ ] Exponential backoff
-- [ ] Rate-limit handling
-- [ ] Provider health state
-- [ ] Clean error messages
+- [x] Timeouts
+- [x] Retries
+- [x] Exponential backoff
+- [x] Rate-limit handling
+- [x] Provider health state
+- [x] Clean error messages
 
 ---
 
