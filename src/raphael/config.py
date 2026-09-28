@@ -28,7 +28,7 @@ class ProviderConfig(BaseModel):
         description="NVIDIA NIM API key",
     )
     nim_model: str = Field(
-        default="nvidia/nemotron-3-super-120b-a12b",
+        default="meta/llama-3.2-11b-vision-instruct",
         description="Default NVIDIA NIM model name",
     )
     openrouter_api_key: SecretStr | None = Field(

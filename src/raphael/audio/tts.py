@@ -82,9 +82,12 @@ class TextToSpeech:
 
     @staticmethod
     def clean_text_for_speech(text: str) -> str:
-        """Clean markdown, code blocks, emojis, and symbols for natural spoken speech."""
+        """Clean markdown, code blocks, reasoning tags, emojis, and symbols for spoken speech."""
+        # Strip reasoning / thinking tags <think>...</think> and <thought>...</thought>
+        clean = re.sub(r"<(think|thought)>[\s\S]*?</\1>", "", text, flags=re.IGNORECASE)
+        clean = re.sub(r"^<(think|thought)>[\s\S]*", "", clean, flags=re.IGNORECASE)
         # Remove code blocks
-        clean = re.sub(r"```[\s\S]*?```", " [code omitted] ", text)
+        clean = re.sub(r"```[\s\S]*?```", " [code omitted] ", clean)
         # Remove inline backticks
         clean = re.sub(r"`([^`]+)`", r"\1", clean)
         # Remove markdown links [text](url) -> text

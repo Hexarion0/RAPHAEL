@@ -140,6 +140,8 @@ def main() -> int:
                 "Respond conversationally and concisely (1 to 3 sentences maximum unless the "
                 "user explicitly asks for detailed explanations or code). "
                 "Be helpful, witty, and direct. "
+                "Provide only your direct spoken answer without any internal "
+                "monologue, thinking process, or preambles. "
                 "Do not use markdown headers, bullet lists, or bold symbols in spoken responses."
             )
 

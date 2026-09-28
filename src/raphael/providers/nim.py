@@ -18,7 +18,7 @@ class NimProvider(LLMProvider):
     """Client for NVIDIA NIM (Inference Microservice) Cloud API."""
 
     name: str = "nim"
-    default_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    default_model: str = "meta/llama-3.2-11b-vision-instruct"
     base_url: str = "https://integrate.api.nvidia.com/v1"
 
     def __init__(
@@ -127,6 +127,8 @@ class NimProvider(LLMProvider):
         latency = time.time() - start_t
         choice = data["choices"][0]
         content = choice["message"]["content"]
+        # Strip internal thinking/reasoning tags if present
+        content = self.clean_reasoning(content)
         usage = data.get("usage", {})
 
         return LLMResponse(
@@ -136,6 +138,17 @@ class NimProvider(LLMProvider):
             usage=usage,
             latency=latency,
         )
+
+    @staticmethod
+    def clean_reasoning(text: str) -> str:
+        """Strip <think>...</think> and internal reasoning tags from model responses."""
+        import re
+
+        # Remove <think>...</think> and <thought>...</thought> blocks
+        cleaned = re.sub(r"<(think|thought)>[\s\S]*?</\1>", "", text, flags=re.IGNORECASE)
+        # Remove unclosed opening think tags
+        cleaned = re.sub(r"^<(think|thought)>[\s\S]*", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip()
 
     def stream(
         self,
