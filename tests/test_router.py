@@ -1,6 +1,6 @@
 """Unit tests for ModelRouter complexity classification and provider routing."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,7 +22,7 @@ def mock_manager():
     manager.ollama = MagicMock()
     manager.ollama.is_configured.return_value = True
 
-    manager.send_with_fallback = AsyncMock(
+    manager.send_with_fallback = MagicMock(
         return_value=LLMResponse(
             content="Mocked response",
             provider="groq",
@@ -78,14 +78,13 @@ def test_routing_decisions(mock_manager):
     assert decision_complex.provider_name == "nim"
 
 
-@pytest.mark.asyncio
-async def test_router_send(mock_manager):
+def test_router_send(mock_manager):
     router = ModelRouter(manager=mock_manager)
     messages = [
         ChatMessage(role="system", content="You are RAPHAEL."),
         ChatMessage(role="user", content="/fast What is the capital of France?"),
     ]
 
-    response = await router.send(messages)
+    response = router.send(messages)
     assert response.content == "Mocked response"
     mock_manager.send_with_fallback.assert_called_once()

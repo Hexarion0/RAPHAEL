@@ -18,10 +18,15 @@ class NimProvider(LLMProvider):
     """Client for NVIDIA NIM (Inference Microservice) Cloud API."""
 
     name: str = "nim"
-    default_model: str = "meta/llama-3.2-11b-vision-instruct"
+    default_model: str = "nvidia/nemotron-3-super-120b-a12b"
     base_url: str = "https://integrate.api.nvidia.com/v1"
 
-    def __init__(self, api_key: str | None = None, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: float = 60.0,
+    ) -> None:
         settings = get_settings()
         if api_key:
             self.api_key = api_key
@@ -29,6 +34,8 @@ class NimProvider(LLMProvider):
             self.api_key = settings.providers.nim_api_key.get_secret_value()
         else:
             self.api_key = None
+
+        self.default_model = model or settings.providers.nim_model or self.default_model
         self.timeout = timeout
 
     def is_configured(self) -> bool:

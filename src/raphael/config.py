@@ -27,6 +27,10 @@ class ProviderConfig(BaseModel):
         default=None,
         description="NVIDIA NIM API key",
     )
+    nim_model: str = Field(
+        default="nvidia/nemotron-3-super-120b-a12b",
+        description="Default NVIDIA NIM model name",
+    )
     openrouter_api_key: SecretStr | None = Field(
         default=None,
         description="OpenRouter API key",
@@ -114,6 +118,7 @@ class Settings(BaseSettings):
 
     # Provider settings
     nim_api_key: SecretStr | None = Field(default=None)
+    nim_model: str = Field(default="nvidia/nemotron-3-super-120b-a12b")
     openrouter_api_key: SecretStr | None = Field(default=None)
     groq_api_key: SecretStr | None = Field(default=None)
     ollama_host: str = Field(default="http://localhost:11434")
@@ -148,6 +153,7 @@ class Settings(BaseSettings):
         """Structured provider configuration."""
         return ProviderConfig(
             nim_api_key=self.nim_api_key,
+            nim_model=self.nim_model,
             openrouter_api_key=self.openrouter_api_key,
             groq_api_key=self.groq_api_key,
             ollama_host=self.ollama_host,

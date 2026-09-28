@@ -1,10 +1,9 @@
-"""Intelligent query complexity classification and model routing for RAPHAEL."""
-
 import re
-from collections.abc import AsyncIterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 
+from raphael.config import get_settings
 from raphael.logging import get_logger
 from raphael.providers.base import ChatMessage, LLMResponse, LLMStreamChunk
 from raphael.providers.manager import ProviderManager
@@ -108,21 +107,23 @@ class ModelRouter:
                     override_applied=override,
                 )
             else:
+                nim_model = get_settings().providers.nim_model
                 decision = RoutingDecision(
                     complexity=complexity,
                     provider_name="nim",
-                    model_name="meta/llama-3.2-11b-vision-instruct",
+                    model_name=nim_model,
                     reason=f"{reason} → Default high-capacity provider",
                     override_applied=override,
                 )
         else:
             # Medium or Complex: Route to primary high-capacity model (NIM / OpenRouter)
             if self.manager.nim.is_configured():
+                nim_model = get_settings().providers.nim_model
                 decision = RoutingDecision(
                     complexity=complexity,
                     provider_name="nim",
-                    model_name="meta/llama-3.2-11b-vision-instruct",
-                    reason=f"{reason} → High reasoning capability via NIM",
+                    model_name=nim_model,
+                    reason=f"{reason} → High reasoning capability via NIM ({nim_model})",
                     override_applied=override,
                 )
             elif self.manager.openrouter.is_configured():
@@ -151,7 +152,7 @@ class ModelRouter:
         )
         return decision
 
-    async def send(
+    def send(
         self,
         messages: list[ChatMessage],
         temperature: float = 0.7,
@@ -168,19 +169,20 @@ class ModelRouter:
         clean_messages = self._clean_override_prefixes(messages)
 
         # Execute with manager fallback starting from chosen provider
-        return await self.manager.send_with_fallback(
+        return self.manager.send_with_fallback(
             clean_messages,
+            preferred_provider=decision.provider_name,
+            model=decision.model_name,
             temperature=temperature,
-            max_tokens=max_tokens,
-            primary_override=decision.provider_name,
+            max_tokens=max_tokens or 512,
         )
 
-    async def stream(
+    def stream(
         self,
         messages: list[ChatMessage],
         temperature: float = 0.7,
         max_tokens: int | None = 512,
-    ) -> AsyncIterator[LLMStreamChunk]:
+    ) -> Iterator[LLMStreamChunk]:
         """Route and stream chat completion tokens with automatic fallback."""
         latest_user_text = next(
             (m.content for m in reversed(messages) if m.role == "user"),
@@ -189,13 +191,13 @@ class ModelRouter:
         decision = self.route(latest_user_text)
         clean_messages = self._clean_override_prefixes(messages)
 
-        async for chunk in self.manager.stream_with_fallback(
+        yield from self.manager.stream_with_fallback(
             clean_messages,
+            preferred_provider=decision.provider_name,
+            model=decision.model_name,
             temperature=temperature,
-            max_tokens=max_tokens,
-            primary_override=decision.provider_name,
-        ):
-            yield chunk
+            max_tokens=max_tokens or 512,
+        )
 
     @staticmethod
     def _clean_override_prefixes(messages: list[ChatMessage]) -> list[ChatMessage]:

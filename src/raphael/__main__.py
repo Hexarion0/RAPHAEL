@@ -1,7 +1,6 @@
 """Entry point for running RAPHAEL via `python -m raphael`."""
 
 import argparse
-import asyncio
 import re
 import sys
 import time
@@ -176,12 +175,7 @@ def main() -> int:
                 conversation_history[:] = [conversation_history[0]] + conversation_history[-10:]
 
             try:
-                loop_async = asyncio.new_event_loop()
-                response = loop_async.run_until_complete(
-                    router.send(conversation_history, temperature=0.7, max_tokens=256)
-                )
-                loop_async.close()
-
+                response = router.send(conversation_history, temperature=0.7, max_tokens=256)
                 reply_text = response.content.strip()
                 logger.info(
                     '🤖 RAPHAEL: "%s" [%s/%s]',
