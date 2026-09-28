@@ -147,14 +147,23 @@ def main() -> int:
             ChatMessage(role="system", content=get_system_prompt())
         ]
 
+        _farewell_re = re.compile(
+            r"\b(bye|goodbye|good\s+night|goodnight|see\s+you|take\s+care|farewell|later|night)\b",
+            re.IGNORECASE,
+        )
+        _in_followup = [False]  # mutable flag shared across calls
+
         def on_wake(info: dict):
             logger.info("🎯 Wake detected! Details: %s", info)
+            _in_followup[0] = False
+            tts.speak("Yes?", block=False)
 
-        def on_transcription(text: str, wake_info: dict, audio_data):
+        def on_transcription(text: str, wake_info: dict, audio_data) -> bool:
             user_text = text.strip()
             if not user_text:
-                logger.info("🗣️ (No speech detected)")
-                return
+                logger.info("🗣️ (No speech detected after wake — returning to standby.)")
+                _in_followup[0] = False
+                return False
 
             logger.info('🗣️ You: "%s"', user_text)
 
@@ -167,11 +176,22 @@ def main() -> int:
             ).strip()
 
             if not cleaned_query:
-                # User just called the wake word
+                # User just said the wake word with no follow-up
                 reply = "Yes, sir? How can I assist you?"
                 logger.info('🤖 RAPHAEL: "%s"', reply)
                 tts.speak(reply, block=True)
-                return
+                _in_followup[0] = True
+                tts.speak("Go ahead.", block=False)
+                return True
+
+            # Check for farewell in the user's query before calling the AI
+            if _farewell_re.search(cleaned_query):
+                logger.info("👋 Farewell detected in user query — ending session.")
+                farewell_reply = "Goodnight, sir. I'll be here when you need me."
+                logger.info('🤖 RAPHAEL: "%s"', farewell_reply)
+                tts.speak(farewell_reply, block=True)
+                _in_followup[0] = False
+                return False
 
             # Update system prompt with fresh timestamp
             conversation_history[0] = ChatMessage(role="system", content=get_system_prompt())
@@ -194,10 +214,24 @@ def main() -> int:
 
                 # Speak response out loud
                 tts.speak(reply_text, block=True)
+
+                # Check if the AI's reply signals session end
+                if _farewell_re.search(reply_text):
+                    logger.info("👋 Farewell detected in AI reply — ending session.")
+                    _in_followup[0] = False
+                    return False
+
+                # Stay in follow-up conversation mode; prompt on first turn
+                if not _in_followup[0]:
+                    _in_followup[0] = True
+                    tts.speak("Go ahead.", block=False)
+                return True
+
             except Exception as err:
                 logger.error("Error generating or speaking AI response: %s", err)
                 error_msg = "Apologies, sir. I encountered an error processing that request."
                 tts.speak(error_msg, block=True)
+                return True  # Stay in conversation despite transient error
 
         loop = WakeListenerLoop(
             audio_backend=audio_backend,

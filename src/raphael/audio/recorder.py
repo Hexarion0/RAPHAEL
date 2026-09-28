@@ -19,12 +19,14 @@ class VoiceRecorder:
         silence_duration_seconds: float = 1.2,
         min_speech_duration_seconds: float = 0.5,
         max_duration_seconds: float = 10.0,
+        initial_silence_timeout: float = 6.0,
     ) -> None:
         self.sample_rate = sample_rate
         self.silence_threshold_rms = silence_threshold_rms
         self.silence_duration_seconds = silence_duration_seconds
         self.min_speech_duration_seconds = min_speech_duration_seconds
         self.max_duration_seconds = max_duration_seconds
+        self.initial_silence_timeout = initial_silence_timeout
 
         self._buffer: list[np.ndarray] = []
         self._is_recording = False
@@ -84,6 +86,15 @@ class VoiceRecorder:
                     logger.info(
                         "Silence detected after speech (%.1fs). Concluding utterance.",
                         silence_elapsed,
+                    )
+                    self._is_recording = False
+                    return False
+            else:
+                # User has not spoken since recording started
+                if (now - self._start_time) >= self.initial_silence_timeout:
+                    logger.debug(
+                        "Initial silence timeout reached (%.1fs). Concluding utterance.",
+                        self.initial_silence_timeout,
                     )
                     self._is_recording = False
                     return False

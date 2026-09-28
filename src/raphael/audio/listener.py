@@ -113,20 +113,34 @@ class WakeListenerLoop:
                         except Exception as err:
                             logger.error("Error in on_utterance callback: %s", err)
 
-                    # Perform STT transcription if STT engine is attached
+                    text = ""
                     if self.stt and len(audio_data) > 0:
                         try:
                             logger.info("Transcribing speech with Whisper...")
                             text = self.stt.transcribe(audio_data)
                             logger.info("🗣️ Transcribed: '%s'", text)
-                            if self.on_transcription:
-                                self.on_transcription(text, wake_info, audio_data)
                         except Exception as err:
                             logger.error("STT transcription error: %s", err)
 
-                    # Reset detector and resume listening for wake word with cooldown protection
-                    self.detector.reset(set_cooldown=True)
-                    self._set_state(ListenerState.LISTENING_WAKE)
+                    keep_listening = False
+                    if self.on_transcription:
+                        try:
+                            result = self.on_transcription(text, wake_info, audio_data)
+                            keep_listening = bool(result) if result is not None else False
+                        except Exception as err:
+                            logger.error("Error in on_transcription callback: %s", err)
+
+                    if keep_listening:
+                        # Follow-up listening mode active — keep recording for next question
+                        logger.info(
+                            "👂 Follow-up mode active — speak your next request or say 'Goodbye'."
+                        )
+                        self.recorder.start()
+                        self._set_state(ListenerState.RECORDING)
+                    else:
+                        # Reset detector and resume waiting for wake word with cooldown protection
+                        self.detector.reset(set_cooldown=True)
+                        self._set_state(ListenerState.LISTENING_WAKE)
 
     def start(self) -> None:
         """Start continuous wake word listening loop."""
