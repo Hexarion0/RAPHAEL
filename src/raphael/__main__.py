@@ -4,7 +4,7 @@ import argparse
 import sys
 import time
 
-from raphael.audio import WakeListenerLoop, WakeWordDetector
+from raphael.audio import SpeechToText, WakeListenerLoop, WakeWordDetector
 from raphael.config import get_settings
 from raphael.logging import setup_logging
 from raphael.platform import get_audio_backend
@@ -16,7 +16,7 @@ def main() -> int:
     parser.add_argument(
         "--listen",
         action="store_true",
-        help="Start the continuous wake-word listener loop",
+        help="Start the continuous wake-word listener loop with STT transcription",
     )
     args = parser.parse_args()
 
@@ -41,7 +41,11 @@ def main() -> int:
         output_name,
         settings.audio.sample_rate,
     )
-    logger.info("Wake Word configured: '%s'", settings.audio.wake_word)
+    logger.info(
+        "Wake Word: '%s' | STT Model: '%s'",
+        settings.audio.wake_word,
+        settings.audio.stt_model,
+    )
 
     # Report provider configuration status safely (boolean status only, no keys printed)
     nim_status = "configured" if settings.providers.nim_api_key else "not set"
@@ -56,33 +60,40 @@ def main() -> int:
     )
 
     if args.listen:
-        logger.info("Starting live wake-word listener... (Say 'Hey Jarvis' or 'Alexa')")
+        logger.info("Initializing wake-word and Whisper STT engine...")
         detector = WakeWordDetector(
             models=settings.audio.wake_models,
             threshold=settings.audio.wake_threshold,
             cooldown_seconds=settings.audio.wake_cooldown,
         )
+        stt = SpeechToText(
+            model_size=settings.audio.stt_model,
+            device=settings.audio.stt_device,
+            compute_type=settings.audio.stt_compute_type,
+            language=settings.audio.stt_language,
+        )
 
         def on_wake(info: dict):
             logger.info("🎯 Wake detected! Details: %s", info)
 
-        def on_utterance(audio_data, wake_info):
-            logger.info(
-                "🎙️ Recorded utterance: %d samples (%.2fs). Ready for STT.",
-                len(audio_data),
-                len(audio_data) / settings.audio.sample_rate,
-            )
+        def on_transcription(text: str, wake_info: dict, audio_data):
+            if text.strip():
+                logger.info('🗣️ You: "%s"', text.strip())
+            else:
+                logger.info("🗣️ (No clear speech detected in recording)")
 
         loop = WakeListenerLoop(
             audio_backend=audio_backend,
             detector=detector,
+            stt=stt,
             on_wake=on_wake,
-            on_utterance=on_utterance,
+            on_transcription=on_transcription,
             sample_rate=settings.audio.sample_rate,
             device=settings.audio.input_device,
         )
 
         loop.start()
+        logger.info("Awaiting wake word... Say 'Hey Jarvis' or 'Alexa' followed by your question.")
         try:
             while True:
                 time.sleep(0.5)
@@ -91,7 +102,7 @@ def main() -> int:
             logger.info("Wake listener terminated cleanly.")
             return 0
 
-    logger.info("Ready. Use '--listen' to start live wake listening. (Milestone 1.2: Wake Word)")
+    logger.info("Ready. Use '--listen' for live voice listening. (Milestone 1.3: Speech-to-Text)")
     return 0
 
 

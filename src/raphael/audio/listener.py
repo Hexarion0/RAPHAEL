@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from raphael.audio.recorder import VoiceRecorder
+from raphael.audio.stt import SpeechToText
 from raphael.audio.wake import WakeWordDetector
 from raphael.logging import get_logger
 from raphael.platform.base import AudioBackend
@@ -26,15 +27,17 @@ class ListenerState(str, Enum):
 
 
 class WakeListenerLoop:
-    """Coordinates audio backend streaming, wake word detection, and utterance recording."""
+    """Coordinates audio backend streaming, wake word detection, utterance recording, and STT."""
 
     def __init__(
         self,
         audio_backend: AudioBackend,
         detector: WakeWordDetector | None = None,
         recorder: VoiceRecorder | None = None,
+        stt: SpeechToText | None = None,
         on_wake: Callable[[dict[str, Any]], None] | None = None,
         on_utterance: Callable[[np.ndarray, dict[str, Any]], None] | None = None,
+        on_transcription: Callable[[str, dict[str, Any], np.ndarray], None] | None = None,
         on_state_change: Callable[[ListenerState], None] | None = None,
         sample_rate: int = 16000,
         device: int | str | None = None,
@@ -42,8 +45,10 @@ class WakeListenerLoop:
         self.backend = audio_backend
         self.detector = detector or WakeWordDetector()
         self.recorder = recorder or VoiceRecorder(sample_rate=sample_rate)
+        self.stt = stt
         self.on_wake = on_wake
         self.on_utterance = on_utterance
+        self.on_transcription = on_transcription
         self.on_state_change = on_state_change
         self.sample_rate = sample_rate
         self.device = device
@@ -107,6 +112,17 @@ class WakeListenerLoop:
                             self.on_utterance(audio_data, wake_info)
                         except Exception as err:
                             logger.error("Error in on_utterance callback: %s", err)
+
+                    # Perform STT transcription if STT engine is attached
+                    if self.stt and len(audio_data) > 0:
+                        try:
+                            logger.info("Transcribing speech with Whisper...")
+                            text = self.stt.transcribe(audio_data)
+                            logger.info("🗣️ Transcribed: '%s'", text)
+                            if self.on_transcription:
+                                self.on_transcription(text, wake_info, audio_data)
+                        except Exception as err:
+                            logger.error("STT transcription error: %s", err)
 
                     # Reset detector and resume listening for wake word
                     self.detector.reset()

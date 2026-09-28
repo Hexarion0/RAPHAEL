@@ -1,0 +1,32 @@
+"""Tests for faster-whisper speech-to-text module."""
+
+import numpy as np
+
+from raphael.audio.stt import SpeechToText
+
+
+def test_stt_initialization():
+    """Verify SpeechToText initializes model cleanly on CPU."""
+    stt = SpeechToText(model_size="tiny.en", device="cpu", compute_type="int8")
+    assert stt.model_size == "tiny.en"
+    assert stt.device == "cpu"
+
+
+def test_stt_empty_audio():
+    """Verify STT handles empty audio arrays without crashing."""
+    stt = SpeechToText(model_size="tiny.en", device="cpu", compute_type="int8")
+    empty_audio = np.empty((0,), dtype=np.float32)
+    result = stt.transcribe(empty_audio)
+    assert result == ""
+
+    detailed = stt.transcribe_detailed(empty_audio)
+    assert detailed["text"] == ""
+    assert detailed["segments"] == []
+
+
+def test_stt_silence_audio():
+    """Verify STT with 1 second of silence produces clean empty output."""
+    stt = SpeechToText(model_size="tiny.en", device="cpu", compute_type="int8")
+    silent_audio = np.zeros(16000, dtype=np.float32)
+    result = stt.transcribe(silent_audio)
+    assert isinstance(result, str)

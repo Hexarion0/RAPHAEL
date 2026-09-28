@@ -21,6 +21,7 @@ dependencies = [
     "soundfile>=0.12.0",
     "openwakeword>=0.4.0",
     "onnxruntime>=1.15.0",
+    "faster-whisper>=1.0.0",
 ]
 
 [project.optional-dependencies]

@@ -42,7 +42,7 @@ class ProviderConfig(BaseModel):
 
 
 class AudioConfig(BaseModel):
-    """Audio and voice loop settings."""
+    """Audio, wake word, and speech-to-text settings."""
 
     wake_word: str = Field(default="raphael", description="Wake word trigger phrase")
     wake_threshold: float = Field(
@@ -56,6 +56,22 @@ class AudioConfig(BaseModel):
     wake_models: list[str] = Field(
         default_factory=lambda: ["hey_jarvis", "alexa"],
         description="List of openWakeWord model names or custom model paths",
+    )
+    stt_model: str = Field(
+        default="base.en",
+        description="faster-whisper model size (e.g. tiny.en, base.en, small.en)",
+    )
+    stt_device: str = Field(
+        default="auto",
+        description="Inference device for whisper (cpu, cuda, auto)",
+    )
+    stt_compute_type: str = Field(
+        default="default",
+        description="Compute precision (int8, float16, float32, default)",
+    )
+    stt_language: str = Field(
+        default="en",
+        description="Primary language code for STT transcription",
     )
     sample_rate: int = Field(default=16000, description="Audio sample rate in Hz")
     channels: int = Field(default=1, description="Audio channel count (1 for mono)")
@@ -90,10 +106,14 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr | None = Field(default=None)
     ollama_host: str = Field(default="http://localhost:11434")
 
-    # Audio settings
+    # Audio & Voice settings
     wake_word: str = Field(default="raphael")
     wake_threshold: float = Field(default=0.5)
     wake_cooldown: float = Field(default=2.0)
+    stt_model: str = Field(default="base.en")
+    stt_device: str = Field(default="auto")
+    stt_compute_type: str = Field(default="default")
+    stt_language: str = Field(default="en")
     audio_sample_rate: int = Field(default=16000)
     audio_channels: int = Field(default=1)
     audio_input_device: int | str | None = Field(default=None)
@@ -125,6 +145,10 @@ class Settings(BaseSettings):
             wake_word=self.wake_word,
             wake_threshold=self.wake_threshold,
             wake_cooldown=self.wake_cooldown,
+            stt_model=self.stt_model,
+            stt_device=self.stt_device,
+            stt_compute_type=self.stt_compute_type,
+            stt_language=self.stt_language,
             sample_rate=self.audio_sample_rate,
             channels=self.audio_channels,
             input_device=self.audio_input_device,

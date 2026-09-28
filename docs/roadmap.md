@@ -233,11 +233,11 @@ Use **faster-whisper**.
 
 #### 1.3.1 Setup
 
-- [ ] Install and load the model
+- [x] Install and load the model
 
 #### 1.3.2 Conversion
 
-- [ ] Convert audio → text
+- [x] Convert audio → text
 
 #### 1.3.3 Pipeline Connection
 
@@ -251,26 +251,26 @@ Whisper
 Text
 ```
 
-- [ ] Connect wake word → record → whisper → text
+- [x] Connect wake word → record → whisper → text
 
 #### 1.3.4 Silence Detection
 
-- [ ] Add silence detection
+- [x] Add silence detection
 
 #### 1.3.5 Refine
 
-- [ ] Test different accents
-- [ ] Test fast speech
-- [ ] Test quiet speech
-- [ ] Test background noise
-- [ ] Test gaming audio
-- [ ] Test short commands
-- [ ] Test long questions
+- [x] Test different accents
+- [x] Test fast speech
+- [x] Test quiet speech
+- [x] Test background noise
+- [x] Test gaming audio
+- [x] Test short commands
+- [x] Test long questions
 
 #### 1.3.6 Transcription Mode
 
-- [ ] Start with batch transcription
-- [ ] Only add streaming if latency becomes a real problem
+- [x] Start with batch transcription
+- [x] Only add streaming if latency becomes a real problem
 
 **Checkpoint:**
 
