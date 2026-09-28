@@ -44,16 +44,21 @@ class WakeWordDetector:
 
         model_paths = self._resolve_model_paths(models)
 
-        logger.info("Initializing openWakeWord detector with models: %s", models)
-        try:
-            self.model = Model(wakeword_model_paths=model_paths)
-            self.available_models = list(self.model.models.keys())
-            logger.info("Loaded openWakeWord models: %s", self.available_models)
-        except Exception as err:
-            logger.warning(
-                "Failed to load openWakeWord model (%s). Relying on keyword spotter.",
-                err,
-            )
+        if model_paths:
+            logger.info("Initializing openWakeWord detector with models: %s", model_paths)
+            try:
+                self.model = Model(wakeword_model_paths=model_paths)
+                self.available_models = list(self.model.models.keys())
+                logger.info("Loaded openWakeWord models: %s", self.available_models)
+            except Exception as err:
+                logger.warning(
+                    "Failed to load openWakeWord model (%s). Relying on keyword spotter.",
+                    err,
+                )
+                self.model = None
+                self.available_models = []
+        else:
+            logger.info("No openWakeWord models configured — using Whisper keyword spotter only.")
             self.model = None
             self.available_models = []
 
@@ -74,11 +79,11 @@ class WakeWordDetector:
 
     @staticmethod
     def _resolve_model_paths(models: list[str] | None) -> list[str]:
-        """Resolve model names to standard pretrained models (avoiding uncalibrated custom ones)."""
-        pretrained_paths = openwakeword.get_pretrained_model_paths()
+        """Resolve model names to full paths. Returns [] when no models are requested."""
         if not models:
-            return pretrained_paths
+            return []  # No models → Whisper-only mode, do NOT load all pretrained models
 
+        pretrained_paths = openwakeword.get_pretrained_model_paths()
         resolved: list[str] = []
         for requested in models:
             req_path = Path(requested)
@@ -96,11 +101,11 @@ class WakeWordDetector:
 
             if not matched:
                 logger.warning(
-                    "Wake model '%s' not in pretrained models. Using defaults.",
+                    "Wake model '%s' not found in pretrained models — skipping.",
                     requested,
                 )
 
-        return resolved or pretrained_paths
+        return resolved
 
     def is_in_cooldown(self) -> bool:
         """Check whether the detector is currently within cooldown protection."""
