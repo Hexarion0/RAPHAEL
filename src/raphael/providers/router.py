@@ -111,18 +111,18 @@ class ModelRouter:
                 decision = RoutingDecision(
                     complexity=complexity,
                     provider_name="nim",
-                    model_name="meta/llama-3.1-70b-instruct",
+                    model_name="meta/llama-3.2-11b-vision-instruct",
                     reason=f"{reason} → Default high-capacity provider",
                     override_applied=override,
                 )
         else:
-            # Medium or Complex: Route to primary high-capacity model (NIM 70B / OpenRouter)
+            # Medium or Complex: Route to primary high-capacity model (NIM / OpenRouter)
             if self.manager.nim.is_configured():
                 decision = RoutingDecision(
                     complexity=complexity,
                     provider_name="nim",
-                    model_name="meta/llama-3.1-70b-instruct",
-                    reason=f"{reason} → High reasoning capability via NIM 70B",
+                    model_name="meta/llama-3.2-11b-vision-instruct",
+                    reason=f"{reason} → High reasoning capability via NIM",
                     override_applied=override,
                 )
             elif self.manager.openrouter.is_configured():

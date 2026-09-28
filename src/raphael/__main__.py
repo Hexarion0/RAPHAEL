@@ -5,6 +5,7 @@ import asyncio
 import re
 import sys
 import time
+from datetime import datetime
 
 from raphael.audio import (
     SpeechToText,
@@ -125,15 +126,19 @@ def main() -> int:
         )
         router = get_model_router()
 
-        system_prompt = (
-            "You are RAPHAEL, a sophisticated, concise, and loyal AI desktop assistant. "
-            "Respond conversationally and concisely (1 to 3 sentences maximum unless the user "
-            "explicitly asks for detailed explanations or code). Be helpful, witty, and direct. "
-            "Do not use markdown headers, bullet lists, or bold symbols in spoken responses."
-        )
+        def get_system_prompt() -> str:
+            now_str = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
+            return (
+                "You are RAPHAEL, a sophisticated, concise, and loyal AI desktop assistant. "
+                f"Current local system time: {now_str}. "
+                "Respond conversationally and concisely (1 to 3 sentences maximum unless the "
+                "user explicitly asks for detailed explanations or code). "
+                "Be helpful, witty, and direct. "
+                "Do not use markdown headers, bullet lists, or bold symbols in spoken responses."
+            )
 
         conversation_history: list[ChatMessage] = [
-            ChatMessage(role="system", content=system_prompt)
+            ChatMessage(role="system", content=get_system_prompt())
         ]
 
         def on_wake(info: dict):
@@ -162,6 +167,8 @@ def main() -> int:
                 tts.speak(reply, block=True)
                 return
 
+            # Update system prompt with fresh timestamp
+            conversation_history[0] = ChatMessage(role="system", content=get_system_prompt())
             # Append user query and generate response
             conversation_history.append(ChatMessage(role="user", content=cleaned_query))
             # Keep history manageable (last 10 turns)

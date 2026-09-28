@@ -18,7 +18,7 @@ class NimProvider(LLMProvider):
     """Client for NVIDIA NIM (Inference Microservice) Cloud API."""
 
     name: str = "nim"
-    default_model: str = "meta/llama-3.1-70b-instruct"
+    default_model: str = "meta/llama-3.2-11b-vision-instruct"
     base_url: str = "https://integrate.api.nvidia.com/v1"
 
     def __init__(self, api_key: str | None = None, timeout: float = 30.0) -> None:
