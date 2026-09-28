@@ -10,6 +10,8 @@ data/
 *.ogg
 *.flac
 models/custom/
+models/tts/
+*.onnx
 
 
 # C extensions
