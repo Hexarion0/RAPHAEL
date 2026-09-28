@@ -135,7 +135,7 @@ def main() -> int:
 
         loop.start()
         logger.info(
-            "Awaiting wake word... Say '%s' (or 'Hey Jarvis' / 'Alexa') followed by your question.",
+            "Awaiting wake word... Say '%s' followed by your question.",
             settings.audio.wake_word.title(),
         )
         try:
