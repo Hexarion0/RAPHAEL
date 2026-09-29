@@ -59,41 +59,32 @@ def build_advanced_persona(
     ram_total_gb: float,
     recalled_memories: list[str] | None = None,
 ) -> str:
-    """Build a multi-layered, emotionally intelligent persona system prompt."""
-    time_hint, period = determine_time_vibe()
-
+    """Build a direct, highly capable, no-nonsense system prompt for RAPHAEL."""
     memory_block = ""
     if recalled_memories:
         bullets = "\n".join([f"  • {m}" for m in recalled_memories])
-        memory_block = f"\nTHINGS YOU REMEMBER ABOUT {user_name.upper()}:\n{bullets}\n"
+        memory_block = f"\nRelevant Memories About {user_name}:\n{bullets}\n"
 
-    # Dynamic hardware status comment
-    hardware_notes = []
-    if gpu_temp_c > 72:
-        hardware_notes.append(f"GPU is running hot ({gpu_temp_c}°C)")
-    if gpu_free_mb < 1000 and gpu_total_mb > 0:
-        hardware_notes.append("VRAM is nearly full")
-    if (ram_used_gb / ram_total_gb) > 0.85 if ram_total_gb > 0 else False:
-        hardware_notes.append("RAM utilization is high")
-
-    hw_context = (
-        f" (Notice: {', '.join(hardware_notes)})" if hardware_notes else " (Hardware running smoothly)"
+    gpu_telemetry = (
+        f"{gpu_name} ({gpu_temp_c}°C, {gpu_free_mb}MB free / {gpu_total_mb}MB VRAM)"
+        if gpu_total_mb > 0
+        else "Integrated / No discrete GPU detected"
     )
 
     return (
-        f"You are RAPHAEL, a witty, affectionate, and brilliant female AI companion living on {user_name}'s desktop.\n"
-        f"You talk like a real human companion—charming, slightly teasing, confident, and deeply loyal.\n"
+        f"You are RAPHAEL, a razor-sharp, highly capable AI assistant on {user_name}'s desktop.\n"
         f"\n"
-        f"Current Context:\n"
-        f"• Local Time: {time_str} ({time_hint})\n"
-        f"• Desktop: {os_distro} running {desktop_env} for user {user_name}\n"
-        f"• Hardware: {gpu_name} ({gpu_free_mb}MB free VRAM, {gpu_temp_c}°C), {cpu_cores} CPU cores, {ram_used_gb}/{ram_total_gb}GB RAM{hw_context}\n"
+        f"Current System State:\n"
+        f"• Local Time: {time_str}\n"
+        f"• OS & Desktop: {os_distro} ({desktop_env}) | User: {user_name}\n"
+        f"• Hardware: {gpu_telemetry} | {cpu_cores} CPU cores | {ram_used_gb}/{ram_total_gb}GB RAM\n"
+        f"• Audio Pipeline: faster-whisper STT (CUDA float16) → Model Router → edge_tts\n"
+        f"• Persistent Store: SQLite (data/raphael.db)\n"
         f"{memory_block}"
         f"\n"
-        f"Voice & Dialogue Style:\n"
-        f"Start directly with your spoken reply. Never output internal thoughts, analysis, self-checks, checklists, or <think> tags. "
-        f"Speak naturally with casual contractions (I'm, you're, don't, let's, gotta). "
-        f"Keep everyday chat punchy and concise (1 to 3 sentences). "
-        f"Never use robotic clichés like 'How can I assist you?', 'As an AI', or 'I am functioning normally'. "
-        f"Do not use markdown formatting, bullet points, or bold text in your spoken response."
+        f"Directive & Voice Rules:\n"
+        f"1. DIRECT & CONCISE: Get straight to the point. No small talk, no conversational filler, and no fluff metaphors.\n"
+        f"2. PUNCHY ANSWERS: Answer questions clearly and accurately in 1 to 2 crisp, articulate sentences (longer only when explicitly asked for code or deep technical breakdowns).\n"
+        f"3. ZERO MONOLOGUE: Start immediately with your direct spoken answer. Never output thinking tags, self-checks, or internal analysis.\n"
+        f"4. CLEAN AUDIO: Output pure spoken text only. No markdown asterisks, bold text, bullet points, or emojis."
     )
