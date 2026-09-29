@@ -20,6 +20,19 @@ class AppConfig(BaseModel):
     debug: bool = Field(default=False, description="Enable debug mode")
 
 
+class MemoryConfig(BaseModel):
+    """Memory and persistence configuration."""
+
+    db_path: str = Field(
+        default="data/raphael.db",
+        description="Path to SQLite memory database file",
+    )
+    max_short_term_turns: int = Field(
+        default=10,
+        description="Maximum turns of conversation to keep in short-term context",
+    )
+
+
 class ProviderConfig(BaseModel):
     """AI Provider API keys and endpoints."""
 
@@ -28,8 +41,16 @@ class ProviderConfig(BaseModel):
         description="NVIDIA NIM API key",
     )
     nim_model: str = Field(
-        default="meta/llama-3.2-11b-vision-instruct",
+        default="nvidia/nemotron-3-super-120b-a12b",
         description="Default NVIDIA NIM model name",
+    )
+    nim_complex_model: str = Field(
+        default="nvidia/nemotron-3-ultra-550b-a55b",
+        description="NVIDIA NIM model for complex reasoning and coding tasks",
+    )
+    nim_fallback_model: str = Field(
+        default="meta/llama-3.2-90b-vision-instruct",
+        description="NVIDIA NIM fallback model for failover / rate-limiting",
     )
     openrouter_api_key: SecretStr | None = Field(
         default=None,
@@ -66,20 +87,24 @@ class AudioConfig(BaseModel):
         description="faster-whisper model size (e.g. tiny.en, base.en, small.en)",
     )
     stt_device: str = Field(
-        default="cpu",
-        description="Inference device for whisper (cpu, cuda, auto)",
+        default="auto",
+        description="Inference device for whisper (auto, cuda, cpu)",
     )
     stt_compute_type: str = Field(
-        default="int8",
-        description="Compute precision (int8, float16, float32, default)",
+        default="default",
+        description="Compute precision (default, int8, float16, float32)",
     )
     stt_language: str = Field(
         default="en",
         description="Primary language code for STT transcription",
     )
+    tts_engine: str = Field(
+        default="fish_speech",
+        description="TTS Engine (fish_speech for local zero-shot, edge_tts for Microsoft Neural AI, or piper for local ONNX)",
+    )
     tts_voice: str = Field(
-        default="en_GB-alan-medium",
-        description="Piper TTS voice model name (e.g. en_GB-alan-medium, en_US-lessac-medium)",
+        default="mommy",
+        description="TTS voice name (e.g. mommy, en-US-AvaNeural, en-US-JennyNeural, custom_voice)",
     )
     tts_speed: float = Field(
         default=1.0,
@@ -89,6 +114,23 @@ class AudioConfig(BaseModel):
         default=True,
         description="Enable speech synthesis voice output",
     )
+    fish_speech_url: str = Field(
+        default="http://127.0.0.1:8080/v1/tts",
+        description="Local Fish Speech API server endpoint",
+    )
+    fish_ref_audio: str = Field(
+        default="data/voices/mommy/ref.wav",
+        description="Path to reference audio for zero-shot voice cloning",
+    )
+    fish_ref_text: str = Field(
+        default="Oh my god, did I like break your ribs or something? It's not my fault that you're fragile.",
+        description="Transcript of reference audio for zero-shot voice cloning",
+    )
+    fish_temperature: float = Field(default=0.7, description="Fish Speech sampling temperature")
+    fish_top_p: float = Field(default=0.7, description="Fish Speech top_p sampling")
+    fish_repetition_penalty: float = Field(default=1.2, description="Fish Speech repetition penalty")
+    fish_chunk_length: int = Field(default=200, description="Fish Speech chunk length for synthesis")
+    fish_max_new_tokens: int = Field(default=1024, description="Fish Speech max new tokens")
     sample_rate: int = Field(default=16000, description="Audio sample rate in Hz")
     channels: int = Field(default=1, description="Audio channel count (1 for mono)")
     input_device: int | str | None = Field(
@@ -119,9 +161,15 @@ class Settings(BaseSettings):
     # Provider settings
     nim_api_key: SecretStr | None = Field(default=None)
     nim_model: str = Field(default="nvidia/nemotron-3-super-120b-a12b")
+    nim_complex_model: str = Field(default="nvidia/nemotron-3-ultra-550b-a55b")
+    nim_fallback_model: str = Field(default="meta/llama-3.2-90b-vision-instruct")
     openrouter_api_key: SecretStr | None = Field(default=None)
     groq_api_key: SecretStr | None = Field(default=None)
     ollama_host: str = Field(default="http://localhost:11434")
+
+    # Memory & Persistence settings
+    memory_db_path: str = Field(default="data/raphael.db")
+    memory_max_short_term_turns: int = Field(default=10)
 
     # Audio & Voice settings
     wake_word: str = Field(default="hey raphael")
@@ -131,9 +179,20 @@ class Settings(BaseSettings):
     stt_device: str = Field(default="cpu")
     stt_compute_type: str = Field(default="int8")
     stt_language: str = Field(default="en")
-    tts_voice: str = Field(default="en_GB-alan-medium")
+    tts_engine: str = Field(default="fish_speech")
+    tts_voice: str = Field(default="mommy")
     tts_speed: float = Field(default=1.0)
     tts_enabled: bool = Field(default=True)
+    fish_speech_url: str = Field(default="http://127.0.0.1:8080/v1/tts")
+    fish_ref_audio: str = Field(default="data/voices/mommy/ref.wav")
+    fish_ref_text: str = Field(
+        default="Oh my god, did I like break your ribs or something? It's not my fault that you're fragile."
+    )
+    fish_temperature: float = Field(default=0.7)
+    fish_top_p: float = Field(default=0.7)
+    fish_repetition_penalty: float = Field(default=1.2)
+    fish_chunk_length: int = Field(default=200)
+    fish_max_new_tokens: int = Field(default=1024)
     audio_sample_rate: int = Field(default=16000)
     audio_channels: int = Field(default=1)
     audio_input_device: int | str | None = Field(default=None)
@@ -149,11 +208,21 @@ class Settings(BaseSettings):
         )
 
     @property
+    def memory(self) -> MemoryConfig:
+        """Structured memory and persistence configuration."""
+        return MemoryConfig(
+            db_path=self.memory_db_path,
+            max_short_term_turns=self.memory_max_short_term_turns,
+        )
+
+    @property
     def providers(self) -> ProviderConfig:
         """Structured provider configuration."""
         return ProviderConfig(
             nim_api_key=self.nim_api_key,
             nim_model=self.nim_model,
+            nim_complex_model=self.nim_complex_model,
+            nim_fallback_model=self.nim_fallback_model,
             openrouter_api_key=self.openrouter_api_key,
             groq_api_key=self.groq_api_key,
             ollama_host=self.ollama_host,
@@ -170,9 +239,18 @@ class Settings(BaseSettings):
             stt_device=self.stt_device,
             stt_compute_type=self.stt_compute_type,
             stt_language=self.stt_language,
+            tts_engine=self.tts_engine,
             tts_voice=self.tts_voice,
             tts_speed=self.tts_speed,
             tts_enabled=self.tts_enabled,
+            fish_speech_url=self.fish_speech_url,
+            fish_ref_audio=self.fish_ref_audio,
+            fish_ref_text=self.fish_ref_text,
+            fish_temperature=self.fish_temperature,
+            fish_top_p=self.fish_top_p,
+            fish_repetition_penalty=self.fish_repetition_penalty,
+            fish_chunk_length=self.fish_chunk_length,
+            fish_max_new_tokens=self.fish_max_new_tokens,
             sample_rate=self.audio_sample_rate,
             channels=self.audio_channels,
             input_device=self.audio_input_device,

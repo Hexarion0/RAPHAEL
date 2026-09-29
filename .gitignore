@@ -12,6 +12,13 @@ data/
 models/custom/
 models/tts/
 *.onnx
+*.db
+*.sqlite3
+
+# Local training artifacts & piper datasets
+training/
+checkpoints/
+results/
 
 
 # C extensions

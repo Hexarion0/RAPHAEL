@@ -111,7 +111,7 @@ def main() -> int:
     )
 
     if args.listen or args.command == "listen":
-        logger.info("Initializing wake-word, Whisper STT, and Piper TTS engines...")
+        logger.info("Initializing wake-word, TTS, and STT engines (STT loads in background)...")
         detector = WakeWordDetector(
             wake_phrase=settings.audio.wake_word,
             models=settings.audio.wake_models,
@@ -126,6 +126,7 @@ def main() -> int:
         )
         tts = TextToSpeech(
             voice_name=settings.audio.tts_voice,
+            engine=settings.audio.tts_engine,
             speed=settings.audio.tts_speed,
             output_device=settings.audio.output_device,
             enabled=settings.audio.tts_enabled,
@@ -135,14 +136,15 @@ def main() -> int:
         def get_system_prompt() -> str:
             now_str = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
             return (
-                "You are RAPHAEL, a sophisticated, concise, and loyal AI desktop assistant. "
-                f"Current local system time: {now_str}. "
-                "Respond conversationally and concisely (1 to 3 sentences maximum unless the "
-                "user explicitly asks for detailed explanations or code). "
-                "Be helpful, witty, and direct. "
-                "Provide only your direct spoken answer without any internal "
-                "monologue, thinking process, or preambles. "
-                "Do not use markdown headers, bullet lists, or bold symbols in spoken responses."
+                "You are RAPHAEL, a warm, witty, and intelligent female AI companion and desktop assistant. "
+                f"Current local time: {now_str}. "
+                "IMPORTANT: Respond IMMEDIATELY with your answer. Do NOT think out loud, do NOT write internal monologue, "
+                "do NOT say 'Okay, the user said...', do NOT use <think> tags or any reasoning preamble. "
+                "Just speak directly and naturally, as if talking to a close friend. "
+                "Use contractions (I'm, you're, don't, let's). Sound human and warm, never robotic. "
+                "Keep replies short and conversational — 1 to 3 sentences for everyday chat, "
+                "longer only for code or detailed explanations. "
+                "No markdown, no bullet points, no bold in spoken responses."
             )
 
         conversation_history: list[ChatMessage] = [
@@ -150,7 +152,7 @@ def main() -> int:
         ]
 
         _farewell_re = re.compile(
-            r"\b(bye|goodbye|good\s+night|goodnight|see\s+you|take\s+care|farewell|later|night)\b",
+            r"\b(bye|goodbye|good\s*night|goodnight|see\s+you\s+(later|soon|around|tomorrow)|take\s+care|farewell)\b",
             re.IGNORECASE,
         )
         _wait_re = re.compile(
@@ -166,7 +168,7 @@ def main() -> int:
         def on_wake(info: dict):
             logger.info("🎯 Wake detected! Details: %s", info)
             _in_followup[0] = False
-            tts.speak("Yes?", block=False)
+            tts.speak("Hey, I'm here!", block=False)
 
         def on_transcription(text: str, wake_info: dict, audio_data) -> bool:
             user_text = text.strip()
@@ -187,7 +189,7 @@ def main() -> int:
 
             if not cleaned_query:
                 # User just said the wake word with no follow-up
-                reply = "Yes, sir? How can I assist you?"
+                reply = "Hey! What's on your mind?"
                 logger.info('🤖 RAPHAEL: "%s"', reply)
                 tts.speak(reply, block=True)
                 _in_followup[0] = True
@@ -203,14 +205,14 @@ def main() -> int:
             # Check if user requested immediate stop / cancel
             if _stop_re.search(cleaned_query):
                 logger.info("🛑 Stop requested ('%s') — returning to standby.", cleaned_query)
-                tts.speak("Understood.", block=True)
+                tts.speak("Got it, quiet now.", block=True)
                 _in_followup[0] = False
                 return False
 
             # Check for farewell in the user's query before calling the AI
             if _farewell_re.search(cleaned_query):
                 logger.info("👋 Farewell detected in user query — ending session.")
-                farewell_reply = "Goodnight, sir. I'll be here when you need me."
+                farewell_reply = "Goodnight! Talk to you soon, take care!"
                 logger.info('🤖 RAPHAEL: "%s"', farewell_reply)
                 tts.speak(farewell_reply, block=True)
                 _in_followup[0] = False
@@ -225,7 +227,7 @@ def main() -> int:
                 conversation_history[:] = [conversation_history[0]] + conversation_history[-10:]
 
             try:
-                response = router.send(conversation_history, temperature=0.7, max_tokens=256)
+                response = router.send(conversation_history, temperature=0.7, max_tokens=400)
                 reply_text = response.content.strip()
                 logger.info(
                     '🤖 RAPHAEL: "%s" [%s/%s]',

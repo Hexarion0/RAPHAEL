@@ -15,10 +15,10 @@ class VoiceRecorder:
     def __init__(
         self,
         sample_rate: int = 16000,
-        silence_threshold_rms: float = 0.015,
-        silence_duration_seconds: float = 1.5,
-        min_speech_duration_seconds: float = 0.5,
-        max_duration_seconds: float = 10.0,
+        silence_threshold_rms: float = 0.008,
+        silence_duration_seconds: float = 1.8,
+        min_speech_duration_seconds: float = 0.25,
+        max_duration_seconds: float = 30.0,
         initial_silence_timeout: float = 3.5,
     ) -> None:
         self.sample_rate = sample_rate

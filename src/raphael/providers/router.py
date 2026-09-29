@@ -97,7 +97,7 @@ class ModelRouter:
                 override_applied=override,
             )
         elif complexity == ComplexityLevel.SIMPLE:
-            # Prefer ultra-fast inference (Groq) if available, otherwise NIM or fallback
+            # Prefer ultra-fast inference (Groq) if available, otherwise NIM default
             if self.manager.groq.is_configured():
                 decision = RoutingDecision(
                     complexity=complexity,
@@ -112,18 +112,45 @@ class ModelRouter:
                     complexity=complexity,
                     provider_name="nim",
                     model_name=nim_model,
-                    reason=f"{reason} → Default high-capacity provider",
+                    reason=f"{reason} → Default NIM provider ({nim_model})",
+                    override_applied=override,
+                )
+        elif complexity == ComplexityLevel.COMPLEX:
+            # Complex reasoning, coding, architecture -> Ultra model
+            if self.manager.nim.is_configured():
+                nim_complex_model = get_settings().providers.nim_complex_model
+                decision = RoutingDecision(
+                    complexity=complexity,
+                    provider_name="nim",
+                    model_name=nim_complex_model,
+                    reason=f"{reason} → Deep reasoning/coding via NIM ({nim_complex_model})",
+                    override_applied=override,
+                )
+            elif self.manager.openrouter.is_configured():
+                decision = RoutingDecision(
+                    complexity=complexity,
+                    provider_name="openrouter",
+                    model_name="meta-llama/llama-3.1-70b-instruct",
+                    reason=f"{reason} → OpenRouter gateway",
+                    override_applied=override,
+                )
+            else:
+                decision = RoutingDecision(
+                    complexity=complexity,
+                    provider_name="groq",
+                    model_name="llama-3.1-8b-instant",
+                    reason=f"{reason} → Groq fallback",
                     override_applied=override,
                 )
         else:
-            # Medium or Complex: Route to primary high-capacity model (NIM / OpenRouter)
+            # Medium: Standard explanatory / conversation -> Default super model
             if self.manager.nim.is_configured():
                 nim_model = get_settings().providers.nim_model
                 decision = RoutingDecision(
                     complexity=complexity,
                     provider_name="nim",
                     model_name=nim_model,
-                    reason=f"{reason} → High reasoning capability via NIM ({nim_model})",
+                    reason=f"{reason} → High-capacity conversational model via NIM ({nim_model})",
                     override_applied=override,
                 )
             elif self.manager.openrouter.is_configured():

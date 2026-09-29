@@ -590,29 +590,12 @@ Give RAPHAEL continuity across conversations and restarts.
 
 Start with SQLite. Do not introduce a vector database until it is actually needed.
 
-Possible schema:
-
-```text
-memories
-──────────────
-id
-content
-type
-created_at
-updated_at
-source
-confidence
-```
-
-Potential types:
-
-```text
-fact
-preference
-project
-conversation
-reminder
-```
+- [x] 2.1.1 Design SQLite schema for `memories` and `conversation_turns`
+- [x] 2.1.2 Create `MemoryItem`, `MemoryType`, and `ConversationTurn` models
+- [x] 2.1.3 Implement `MemoryStore` persistence engine (WAL mode, connection pooling, thread-safe)
+- [x] 2.1.4 Implement CRUD and keyword search operations
+- [x] 2.1.5 Configure database path in centralized settings (`data/raphael.db`)
+- [x] 2.1.6 Unit tests for SQLite memory engine (CRUD, search, turn ordering)
 
 ---
 

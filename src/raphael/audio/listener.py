@@ -117,20 +117,44 @@ class WakeListenerLoop:
                     except Exception as err:
                         logger.error("Error in on_transcription callback: %s", err)
 
-                with self._lock:
-                    if self._state == ListenerState.RECORDING:
-                        # Barge-in already started recording user utterance — preserve state
-                        pass
-                    elif self._state == ListenerState.PROCESSING:
-                        if keep_listening:
-                            logger.info(
-                                "👂 Follow-up mode active — speak next request or say 'Goodbye'."
-                            )
-                            self.recorder.start()
-                            self._set_state(ListenerState.RECORDING)
-                        else:
-                            self.detector.reset(set_cooldown=True)
+                try:
+                    with self._lock:
+                        if self._state == ListenerState.RECORDING:
+                            if not keep_listening:
+                                # A barge-in or follow-up recording is active but the
+                                # transcription result says we should end the session
+                                # (e.g. farewell or stop command). Cancel the recording.
+                                self.recorder._is_recording = False
+                                self.detector.reset(set_cooldown=True)
+                                self._set_state(ListenerState.LISTENING_WAKE)
+                            # else: recording already in progress — let it continue
+                        elif self._state == ListenerState.PROCESSING:
+                            if keep_listening:
+                                logger.info(
+                                    "👂 Follow-up mode active — speak next request or say 'Goodbye'."
+                                )
+                                self.recorder.start()
+                                self._set_state(ListenerState.RECORDING)
+                            else:
+                                self.detector.reset(set_cooldown=True)
+                                self._set_state(ListenerState.LISTENING_WAKE)
+                except Exception as err:
+                    logger.error("Error during state transition in worker — recovering to LISTENING_WAKE: %s", err)
+                    try:
+                        with self._lock:
+                            self.detector.reset(set_cooldown=False)
                             self._set_state(ListenerState.LISTENING_WAKE)
+                    except Exception as inner_err:
+                        logger.error("Failed to recover state: %s", inner_err)
+
+            except Exception as err:
+                logger.error("Unhandled error in processing worker — recovering: %s", err)
+                try:
+                    with self._lock:
+                        self.detector.reset(set_cooldown=False)
+                        self._set_state(ListenerState.LISTENING_WAKE)
+                except Exception as inner_err:
+                    logger.error("Failed to recover state after unhandled error: %s", inner_err)
             finally:
                 self._processing_queue.task_done()
 
@@ -164,6 +188,7 @@ class WakeListenerLoop:
                         except Exception as err:
                             logger.error("Error in on_barge_in callback: %s", err)
                     self.recorder.start()
+                    self.recorder.add_frame(indata)  # capture the triggering frame
                     self._set_state(ListenerState.RECORDING)
                     return
 
@@ -199,7 +224,6 @@ class WakeListenerLoop:
 
                 continue_recording = self.recorder.add_frame(indata)
                 if not continue_recording:
-                    self._set_state(ListenerState.PROCESSING)
                     audio_data = self.recorder.get_audio()
                     wake_info = self._last_wake_info.copy()
 
@@ -209,8 +233,11 @@ class WakeListenerLoop:
                         except Exception as err:
                             logger.error("Error in on_utterance callback: %s", err)
 
-                    # Dispatch to worker thread so audio stream is never blocked
+                    # Queue BEFORE state change so the worker never sees PROCESSING
+                    # with an empty queue (which causes it to race into follow-up RECORDING
+                    # and then silently discard the barge-in audio's keep_listening result).
                     self._processing_queue.put((audio_data, wake_info))
+                    self._set_state(ListenerState.PROCESSING)
 
     def start(self) -> None:
         """Start continuous wake word listening loop and worker thread."""

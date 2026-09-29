@@ -18,7 +18,7 @@ class NimProvider(LLMProvider):
     """Client for NVIDIA NIM (Inference Microservice) Cloud API."""
 
     name: str = "nim"
-    default_model: str = "meta/llama-3.2-11b-vision-instruct"
+    default_model: str = "nvidia/nemotron-3-super-120b-a12b"
     base_url: str = "https://integrate.api.nvidia.com/v1"
 
     def __init__(
@@ -36,6 +36,8 @@ class NimProvider(LLMProvider):
             self.api_key = None
 
         self.default_model = model or settings.providers.nim_model or self.default_model
+        self.complex_model = settings.providers.nim_complex_model
+        self.fallback_model = settings.providers.nim_fallback_model or "meta/llama-3.2-90b-vision-instruct"
         self.timeout = timeout
 
     def is_configured(self) -> bool:
@@ -63,7 +65,7 @@ class NimProvider(LLMProvider):
             logger.debug("NIM health check failed: %s", err)
             return False
 
-    RELIABLE_BACKUP_MODEL: str = "meta/llama-3.2-11b-vision-instruct"
+    RELIABLE_BACKUP_MODEL: str = "meta/llama-3.2-90b-vision-instruct"
 
     def send(
         self,
@@ -73,9 +75,10 @@ class NimProvider(LLMProvider):
         max_tokens: int = 1024,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Send chat messages to NVIDIA NIM with automatic model fallback on server errors."""
+        """Send chat messages to NVIDIA NIM — retries same model 3× before falling back."""
         msgs = self.normalize_messages(messages)
         target_model = model or self.default_model
+        fallback_model = self.fallback_model or self.RELIABLE_BACKUP_MODEL
 
         payload = {
             "model": target_model,
@@ -86,41 +89,54 @@ class NimProvider(LLMProvider):
             **kwargs,
         }
 
+        RETRYABLE = (429, 500, 502, 503, 504)
+        MAX_RETRIES = 3
+
         start_t = time.time()
         with httpx.Client(timeout=self.timeout) as client:
-            try:
-                resp = client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self._get_headers(),
-                    json=payload,
-                )
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as err:
-                # If primary model is overloaded (503/504) or unavailable (404), fallback to 11B
-                if target_model != self.RELIABLE_BACKUP_MODEL and err.response.status_code in (
-                    404,
-                    429,
-                    500,
-                    502,
-                    503,
-                    504,
-                ):
-                    logger.warning(
-                        "NIM model '%s' returned HTTP %d. Retrying with reliable backup '%s'...",
-                        target_model,
-                        err.response.status_code,
-                        self.RELIABLE_BACKUP_MODEL,
-                    )
-                    payload["model"] = self.RELIABLE_BACKUP_MODEL
+            last_err: httpx.HTTPStatusError | None = None
+            for attempt in range(MAX_RETRIES):
+                try:
                     resp = client.post(
                         f"{self.base_url}/chat/completions",
                         headers=self._get_headers(),
                         json=payload,
                     )
                     resp.raise_for_status()
-                    target_model = self.RELIABLE_BACKUP_MODEL
+                    last_err = None
+                    break
+                except httpx.HTTPStatusError as err:
+                    last_err = err
+                    if err.response.status_code not in RETRYABLE:
+                        raise
+                    wait = 0.5 * (2 ** attempt)  # 0.5s → 1s → 2s
+                    logger.warning(
+                        "NIM '%s' HTTP %d (attempt %d/%d) — retrying in %.1fs...",
+                        target_model,
+                        err.response.status_code,
+                        attempt + 1,
+                        MAX_RETRIES,
+                        wait,
+                    )
+                    time.sleep(wait)
+
+            # All retries exhausted — fall back to secondary model once
+            if last_err is not None:
+                if target_model != fallback_model:
+                    logger.warning(
+                        "NIM '%s' failed after %d retries. Falling back to '%s'.",
+                        target_model, MAX_RETRIES, fallback_model,
+                    )
+                    payload["model"] = fallback_model
+                    resp = client.post(
+                        f"{self.base_url}/chat/completions",
+                        headers=self._get_headers(),
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    target_model = fallback_model
                 else:
-                    raise
+                    raise last_err
 
             data = resp.json()
 
@@ -141,13 +157,54 @@ class NimProvider(LLMProvider):
 
     @staticmethod
     def clean_reasoning(text: str) -> str:
-        """Strip <think>...</think> and internal reasoning tags from model responses."""
+        """Strip internal reasoning tags and Nemotron CoT monologue from model responses."""
         import re
 
-        # Remove <think>...</think> and <thought>...</thought> blocks
-        cleaned = re.sub(r"<(think|thought)>[\s\S]*?</\1>", "", text, flags=re.IGNORECASE)
-        # Remove unclosed opening think tags
-        cleaned = re.sub(r"^<(think|thought)>[\s\S]*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = text.strip()
+
+        # 1. Remove properly closed XML thinking tags
+        cleaned = re.sub(
+            r"<(think|thought|reasoning|reflection)>[\s\S]*?</\1>",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+        # 2. Handle unclosed opening thinking tags — keep prefix before tag, discard rest
+        unclosed = re.search(r"<(think|thought|reasoning|reflection)>", cleaned, re.IGNORECASE)
+        if unclosed:
+            after = cleaned[unclosed.end():].strip()
+            close = re.search(r"</(think|thought|reasoning|reflection)>", after, re.IGNORECASE)
+            if close:
+                cleaned = after[close.end():].strip()
+            else:
+                cleaned = cleaned[:unclosed.start()].strip()
+
+        cleaned = cleaned.strip()
+
+        # 3. Detect Nemotron-style CoT ending with a "Final X:" marker
+        final_marker_match = re.search(
+            r"(?:Final\s+(?:decision|call|answer|response)|Decision|Direct\s+response)[:\s]+(.+)$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if final_marker_match:
+            final_part = final_marker_match.group(1).strip()
+            quoted_match = re.match(r'^\"(.+)\"$', final_part, re.DOTALL)
+            if quoted_match:
+                return quoted_match.group(1).strip()
+            return final_part
+
+        # 4. Detect raw thinking monologue at start — return last paragraph as reply
+        if re.match(
+            r"^\s*(Okay[,.]?\s|Hmm[,.]?\s|Alright[,.]?\s|Let me\s|Looking at|The user|I need to|I should|I'll analyze)",
+            cleaned,
+            re.IGNORECASE,
+        ):
+            paragraphs = [p.strip() for p in re.split(r"\n{2,}", cleaned) if p.strip()]
+            if paragraphs:
+                return paragraphs[-1]
+
         return cleaned.strip()
 
     def stream(
@@ -158,9 +215,10 @@ class NimProvider(LLMProvider):
         max_tokens: int = 1024,
         **kwargs: Any,
     ) -> Iterator[LLMStreamChunk]:
-        """Stream chat completion chunks from NVIDIA NIM."""
+        """Stream chat completion chunks from NVIDIA NIM — retries same model 3× before falling back."""
         msgs = self.normalize_messages(messages)
         target_model = model or self.default_model
+        fallback_model = self.fallback_model or self.RELIABLE_BACKUP_MODEL
 
         payload = {
             "model": target_model,
@@ -171,87 +229,63 @@ class NimProvider(LLMProvider):
             **kwargs,
         }
 
+        RETRYABLE = (429, 500, 502, 503, 504)
+        MAX_RETRIES = 3
+
+        def _iter_stream(client: httpx.Client, active_model: str) -> Iterator[LLMStreamChunk]:
+            with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers=self._get_headers(),
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    line = line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if data_str == "[DONE]":
+                        yield LLMStreamChunk(delta="", model=active_model, provider=self.name, is_final=True)
+                        break
+                    try:
+                        chunk_json = json.loads(data_str)
+                        delta = chunk_json["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            yield LLMStreamChunk(delta=delta, model=active_model, provider=self.name, is_final=False)
+                    except json.JSONDecodeError:
+                        continue
+
         with httpx.Client(timeout=self.timeout) as client:
-            try:
-                with client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    headers=self._get_headers(),
-                    json=payload,
-                ) as response:
-                    response.raise_for_status()
-                    for line in response.iter_lines():
-                        line = line.strip()
-                        if not line or not line.startswith("data:"):
-                            continue
-                        data_str = line[len("data:") :].strip()
-                        if data_str == "[DONE]":
-                            yield LLMStreamChunk(
-                                delta="",
-                                model=target_model,
-                                provider=self.name,
-                                is_final=True,
-                            )
-                            break
-                        try:
-                            chunk_json = json.loads(data_str)
-                            delta = chunk_json["choices"][0]["delta"].get("content", "")
-                            if delta:
-                                yield LLMStreamChunk(
-                                    delta=delta,
-                                    model=target_model,
-                                    provider=self.name,
-                                    is_final=False,
-                                )
-                        except json.JSONDecodeError:
-                            continue
-            except httpx.HTTPStatusError as err:
-                if target_model != self.RELIABLE_BACKUP_MODEL and err.response.status_code in (
-                    404,
-                    429,
-                    500,
-                    502,
-                    503,
-                    504,
-                ):
+            last_err: httpx.HTTPStatusError | None = None
+            for attempt in range(MAX_RETRIES):
+                try:
+                    yield from _iter_stream(client, target_model)
+                    return
+                except httpx.HTTPStatusError as err:
+                    last_err = err
+                    if err.response.status_code not in RETRYABLE:
+                        raise
+                    wait = 0.5 * (2 ** attempt)  # 0.5s → 1s → 2s
                     logger.warning(
-                        "NIM streaming with '%s' failed (HTTP %d). Falling back to '%s'...",
+                        "NIM stream '%s' HTTP %d (attempt %d/%d) — retrying in %.1fs...",
                         target_model,
                         err.response.status_code,
-                        self.RELIABLE_BACKUP_MODEL,
+                        attempt + 1,
+                        MAX_RETRIES,
+                        wait,
                     )
-                    payload["model"] = self.RELIABLE_BACKUP_MODEL
-                    with client.stream(
-                        "POST",
-                        f"{self.base_url}/chat/completions",
-                        headers=self._get_headers(),
-                        json=payload,
-                    ) as response:
-                        response.raise_for_status()
-                        for line in response.iter_lines():
-                            line = line.strip()
-                            if not line or not line.startswith("data:"):
-                                continue
-                            data_str = line[len("data:") :].strip()
-                            if data_str == "[DONE]":
-                                yield LLMStreamChunk(
-                                    delta="",
-                                    model=self.RELIABLE_BACKUP_MODEL,
-                                    provider=self.name,
-                                    is_final=True,
-                                )
-                                break
-                            try:
-                                chunk_json = json.loads(data_str)
-                                delta = chunk_json["choices"][0]["delta"].get("content", "")
-                                if delta:
-                                    yield LLMStreamChunk(
-                                        delta=delta,
-                                        model=self.RELIABLE_BACKUP_MODEL,
-                                        provider=self.name,
-                                        is_final=False,
-                                    )
-                            except json.JSONDecodeError:
-                                continue
+                    time.sleep(wait)
+
+            # All retries exhausted — fall back once
+            if last_err is not None:
+                if target_model != fallback_model:
+                    logger.warning(
+                        "NIM stream '%s' failed after %d retries. Falling back to '%s'.",
+                        target_model, MAX_RETRIES, fallback_model,
+                    )
+                    payload["model"] = fallback_model
+                    yield from _iter_stream(client, fallback_model)
                 else:
-                    raise
+                    raise last_err
+
