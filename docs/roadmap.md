@@ -601,17 +601,10 @@ Start with SQLite. Do not introduce a vector database until it is actually neede
 
 ### 2.2 Short-Term Memory
 
-#### 2.2.1
-- [ ] Store the current conversation
-
-#### 2.2.2
-- [ ] Pass relevant conversation to the model
-
-#### 2.2.3
-- [ ] Limit context size
-
-#### 2.2.4
-- [ ] Summarize older conversation when necessary
+- [x] 2.2.1 Store the current conversation turns persistently in SQLite (`ConversationTurn`)
+- [x] 2.2.2 Pass relevant conversation to the model across sessions and restarts (`ConversationManager`)
+- [x] 2.2.3 Limit context size with sliding context window (`max_short_term_turns`)
+- [x] 2.2.4 Summarize older conversation when turns exceed threshold (`summarize_older_turns`)
 
 ---
 
