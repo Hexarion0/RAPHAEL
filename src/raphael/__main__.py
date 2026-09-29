@@ -16,7 +16,8 @@ from raphael.audio import (
 )
 from raphael.config import get_settings
 from raphael.logging import setup_logging
-from raphael.platform import get_audio_backend
+from raphael.memory import ConversationTurn, MemoryItem, MemoryStore, MemoryType
+from raphael.platform import generate_system_prompt, get_audio_backend
 from raphael.providers import ChatMessage, get_model_router
 
 
@@ -133,22 +134,22 @@ def main() -> int:
         )
         router = get_model_router()
 
-        def get_system_prompt() -> str:
-            now_str = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
-            return (
-                "You are RAPHAEL, a warm, witty, and intelligent female AI companion and desktop assistant. "
-                f"Current local time: {now_str}. "
-                "IMPORTANT: Respond IMMEDIATELY with your answer. Do NOT think out loud, do NOT write internal monologue, "
-                "do NOT say 'Okay, the user said...', do NOT use <think> tags or any reasoning preamble. "
-                "Just speak directly and naturally, as if talking to a close friend. "
-                "Use contractions (I'm, you're, don't, let's). Sound human and warm, never robotic. "
-                "Keep replies short and conversational — 1 to 3 sentences for everyday chat, "
-                "longer only for code or detailed explanations. "
-                "No markdown, no bullet points, no bold in spoken responses."
-            )
+        memory_store = MemoryStore(db_path=settings.memory.db_path)
+
+        def build_system_prompt(query: str = "") -> str:
+            recalled_memories: list[str] = []
+            if query:
+                results = memory_store.search_memories(query, limit=4)
+                recalled_memories.extend([r.content for r in results])
+            # Always include general user preferences if available
+            prefs = memory_store.list_memories(memory_type=MemoryType.PREFERENCE, limit=3)
+            for p in prefs:
+                if p.content not in recalled_memories:
+                    recalled_memories.append(p.content)
+            return generate_system_prompt(settings=settings, memories=recalled_memories)
 
         conversation_history: list[ChatMessage] = [
-            ChatMessage(role="system", content=get_system_prompt())
+            ChatMessage(role="system", content=build_system_prompt())
         ]
 
         _farewell_re = re.compile(
@@ -161,6 +162,14 @@ def main() -> int:
         )
         _stop_re = re.compile(
             r"^(stop|be\s+quiet|shut\s+up|never\s*mind|cancel)[.?!]*$",
+            re.IGNORECASE,
+        )
+        _remember_re = re.compile(
+            r"^(?:please\s+)?(?:remember\s+that|remember|note\s+that)\s+(.+)$",
+            re.IGNORECASE,
+        )
+        _forget_re = re.compile(
+            r"^(?:please\s+)?(?:forget\s+that|forget\s+about|forget)\s+(.+)$",
             re.IGNORECASE,
         )
         _in_followup = [False]  # mutable flag shared across calls
@@ -209,6 +218,36 @@ def main() -> int:
                 _in_followup[0] = False
                 return False
 
+            # Check for explicit memory storage ("Remember that...")
+            remember_match = _remember_re.search(cleaned_query)
+            if remember_match:
+                fact_to_remember = remember_match.group(1).strip()
+                memory_store.save_memory(
+                    MemoryItem(
+                        content=fact_to_remember,
+                        memory_type=MemoryType.FACT,
+                        source="user_explicit",
+                    )
+                )
+                logger.info("💾 Explicit memory stored: '%s'", fact_to_remember)
+                ack = f"Got it, I'll remember that {fact_to_remember}."
+                logger.info('🤖 RAPHAEL: "%s"', ack)
+                tts.speak(ack, block=True)
+                _in_followup[0] = True
+                return True
+
+            # Check for explicit memory deletion ("Forget that...")
+            forget_match = _forget_re.search(cleaned_query)
+            if forget_match:
+                topic_to_forget = forget_match.group(1).strip()
+                deleted_count = memory_store.delete_by_pattern(topic_to_forget)
+                logger.info("🗑️ Explicit memory deleted (%d matching '%s')", deleted_count, topic_to_forget)
+                ack = f"Done, I've cleared that from my memory."
+                logger.info('🤖 RAPHAEL: "%s"', ack)
+                tts.speak(ack, block=True)
+                _in_followup[0] = True
+                return True
+
             # Check for farewell in the user's query before calling the AI
             if _farewell_re.search(cleaned_query):
                 logger.info("👋 Farewell detected in user query — ending session.")
@@ -218,8 +257,13 @@ def main() -> int:
                 _in_followup[0] = False
                 return False
 
-            # Update system prompt with fresh timestamp
-            conversation_history[0] = ChatMessage(role="system", content=get_system_prompt())
+            # Save user turn to persistent SQLite store
+            memory_store.save_turn(
+                ConversationTurn(role="user", content=cleaned_query)
+            )
+
+            # Update system prompt dynamically with fresh system stats & recalled memories
+            conversation_history[0] = ChatMessage(role="system", content=build_system_prompt(cleaned_query))
             # Append user query and generate response
             conversation_history.append(ChatMessage(role="user", content=cleaned_query))
             # Keep history manageable (last 10 turns)
@@ -236,6 +280,17 @@ def main() -> int:
                     response.model,
                 )
                 conversation_history.append(ChatMessage(role="assistant", content=reply_text))
+
+                # Save assistant turn to persistent SQLite store
+                memory_store.save_turn(
+                    ConversationTurn(
+                        role="assistant",
+                        content=reply_text,
+                        provider=response.provider,
+                        model=response.model,
+                        latency=response.latency,
+                    )
+                )
 
                 # Speak response out loud
                 tts.speak(reply_text, block=True)

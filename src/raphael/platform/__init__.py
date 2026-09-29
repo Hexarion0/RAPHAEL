@@ -4,6 +4,12 @@ import sys
 
 from raphael.platform.base import AudioBackend, AudioDeviceInfo
 from raphael.platform.linux import LinuxAudioBackend
+from raphael.platform.system_info import (
+    GpuInfo,
+    SystemSnapshot,
+    generate_system_prompt,
+    get_system_snapshot,
+)
 
 
 def get_audio_backend() -> AudioBackend:
@@ -18,4 +24,13 @@ def get_audio_backend() -> AudioBackend:
         return LinuxAudioBackend()
 
 
-__all__ = ["AudioBackend", "AudioDeviceInfo", "LinuxAudioBackend", "get_audio_backend"]
+__all__ = [
+    "AudioBackend",
+    "AudioDeviceInfo",
+    "LinuxAudioBackend",
+    "get_audio_backend",
+    "GpuInfo",
+    "SystemSnapshot",
+    "get_system_snapshot",
+    "generate_system_prompt",
+]
