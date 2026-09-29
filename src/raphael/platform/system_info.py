@@ -201,44 +201,25 @@ def generate_system_prompt(
     settings: Settings | None = None,
     memories: list[str] | None = None,
 ) -> str:
-    """Generate a rich, context-aware system agenda prompt for RAPHAEL."""
+    """Generate a rich, context-aware system agenda and advanced persona prompt for RAPHAEL."""
+    from raphael.persona import build_advanced_persona
+
     snap = snapshot or get_system_snapshot(settings=settings)
     now_str = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
 
-    gpu_str = (
-        f"{snap.gpu.name} ({snap.gpu.free_vram_mb} MB free / {snap.gpu.total_vram_mb} MB, {snap.gpu.temperature_c}°C)"
-        if snap.gpu.available
-        else "Integrated / No discrete GPU detected"
-    )
+    gpu_name = snap.gpu.name if snap.gpu.available else "Integrated Graphics"
 
-    memory_section = ""
-    if memories:
-        memory_lines = "\n".join([f"- {m}" for m in memories])
-        memory_section = f"\nRECALLED MEMORIES & FACTS ABOUT USER:\n{memory_lines}\n"
-
-    return (
-        f"You are RAPHAEL, an intelligent, charming, and warm female AI companion and desktop assistant for {snap.user_name}.\n"
-        f"Current Local Time: {now_str}\n"
-        f"\n"
-        f"SYSTEM ENVIRONMENT:\n"
-        f"- OS: {snap.os_distro} (Kernel {snap.kernel_version}, Desktop: {snap.desktop_environment})\n"
-        f"- Host: {snap.hostname} | User: {snap.user_name}\n"
-        f"- CPU: {snap.cpu_count} cores | RAM: {snap.ram_used_gb}/{snap.ram_total_gb} GB ({snap.ram_percent}% used)\n"
-        f"- GPU: {gpu_str}\n"
-        f"- Audio Pipeline: STT={snap.stt_model} | TTS={snap.tts_engine} | Wake='{snap.wake_word}'\n"
-        f"- Persistent Memory Store: SQLite ({snap.memory_db})\n"
-        f"{memory_section}"
-        f"\n"
-        f"YOUR CAPABILITIES & TOOLS:\n"
-        f"- Conversational companion with voice barge-in interruption.\n"
-        f"- System monitor (you know the live GPU temperature, VRAM, CPU, RAM, and OS status).\n"
-        f"- Persistent memory (you store and recall facts, user preferences, and project info across restarts).\n"
-        f"- Multi-provider AI intelligence routed dynamically by task complexity.\n"
-        f"\n"
-        f"CONVERSATIONAL GUIDELINES:\n"
-        f"1. Respond IMMEDIATELY with your direct spoken answer. NEVER write internal monologue, thoughts, self-analysis, or <think> tags.\n"
-        f"2. Speak warmly, naturally, and intelligently like a true companion. Use contractions (I'm, you're, don't, let's).\n"
-        f"3. Keep answers concise (1 to 3 natural sentences for everyday chat, longer only when providing code or deep technical explanations).\n"
-        f"4. If asked about your system, hardware, GPU temp, memory, or capabilities, answer accurately using the real telemetry above.\n"
-        f"5. No markdown formatting, bullet points, or bold stars in spoken dialogue."
+    return build_advanced_persona(
+        user_name=snap.user_name,
+        time_str=now_str,
+        os_distro=snap.os_distro,
+        desktop_env=snap.desktop_environment,
+        gpu_name=gpu_name,
+        gpu_temp_c=snap.gpu.temperature_c,
+        gpu_free_mb=snap.gpu.free_vram_mb,
+        gpu_total_mb=snap.gpu.total_vram_mb,
+        cpu_cores=snap.cpu_count,
+        ram_used_gb=snap.ram_used_gb,
+        ram_total_gb=snap.ram_total_gb,
+        recalled_memories=memories,
     )
