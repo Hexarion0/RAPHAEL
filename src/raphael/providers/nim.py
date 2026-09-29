@@ -142,9 +142,30 @@ class NimProvider(LLMProvider):
 
         latency = time.time() - start_t
         choice = data["choices"][0]
-        content = choice["message"]["content"]
-        # Strip internal thinking/reasoning tags if present
-        content = self.clean_reasoning(content)
+        raw_content = choice["message"]["content"]
+        # Strip internal thinking/reasoning tags and self-check checklists
+        content = self.clean_reasoning(raw_content)
+
+        # If primary model outputted only internal reasoning, try fallback model
+        if not content.strip() and target_model != fallback_model:
+            logger.warning(
+                "NIM '%s' output was entirely internal reasoning/self-check. Falling back to '%s'...",
+                target_model,
+                fallback_model,
+            )
+            payload["model"] = fallback_model
+            with httpx.Client(timeout=self.timeout) as client:
+                fb_resp = client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=self._get_headers(),
+                    json=payload,
+                )
+                if fb_resp.status_code == 200:
+                    fb_data = fb_resp.json()
+                    content = self.clean_reasoning(fb_data["choices"][0]["message"]["content"])
+                    target_model = fallback_model
+                    data = fb_data
+
         usage = data.get("usage", {})
 
         return LLMResponse(
@@ -157,7 +178,7 @@ class NimProvider(LLMProvider):
 
     @staticmethod
     def clean_reasoning(text: str) -> str:
-        """Strip internal reasoning tags and Nemotron CoT monologue from model responses."""
+        """Strip internal reasoning tags, self-check blocks, and Nemotron CoT monologue."""
         import re
 
         cleaned = text.strip()
@@ -182,9 +203,17 @@ class NimProvider(LLMProvider):
 
         cleaned = cleaned.strip()
 
-        # 3. Detect Nemotron-style CoT ending with a "Final X:" marker
+        # 3. Strip *Self-check:*, *Plan:*, [Analysis], etc. preamble blocks
+        cleaned = re.sub(
+            r"^\s*[*#_\[]*\s*(?:Self[- ]check|Plan|Analysis|Reasoning|Thought|Evaluation|Draft|Pre-computation|Check|Internal|Notes?)[*#_\]:]*[\s\S]*?(?=\n\s*\n\s*[A-Za-z0-9\"\'\“\‘]|$)",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        # 4. Detect Nemotron-style CoT ending with a "Final X:" marker
         final_marker_match = re.search(
-            r"(?:Final\s+(?:decision|call|answer|response)|Decision|Direct\s+response)[:\s]+(.+)$",
+            r"(?:Final\s+(?:decision|call|answer|response|statement)|Decision|Direct\s+response)[:\s]+(.+)$",
             cleaned,
             flags=re.IGNORECASE | re.DOTALL,
         )
@@ -195,7 +224,20 @@ class NimProvider(LLMProvider):
                 return quoted_match.group(1).strip()
             return final_part
 
-        # 4. Detect raw thinking monologue at start — return last paragraph as reply
+        # 5. If response is still starting with bulleted meta lines (- Banned phrases avoided? etc.)
+        if cleaned.startswith("- ") or cleaned.startswith("* ") or cleaned.startswith("• "):
+            non_bullet = [
+                line.strip()
+                for line in cleaned.splitlines()
+                if line.strip() and not line.strip().startswith(("-", "*", "•"))
+            ]
+            if non_bullet:
+                cleaned = " ".join(non_bullet).strip()
+            else:
+                # If everything was just bullet self-checks with no real response
+                cleaned = ""
+
+        # 6. Detect raw thinking monologue at start — return last paragraph as reply
         if re.match(
             r"^\s*(Okay[,.]?\s|Hmm[,.]?\s|Alright[,.]?\s|Let me\s|Looking at|The user|I need to|I should|I'll analyze)",
             cleaned,
