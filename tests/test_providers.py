@@ -141,3 +141,81 @@ def test_provider_manager_all_fail():
 
     with pytest.raises(RuntimeError, match="All AI providers in fallback chain failed"):
         manager.send_with_fallback("Hello")
+
+
+def completion(content, **kwargs):
+    import httpx
+
+    return httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://example.test/completions"),
+        json={"choices": [{"message": {"content": content, **kwargs}}]},
+    )
+
+
+@patch("httpx.Client.post")
+def test_nim_null_reply_tries_backup_without_speaking_reasoning(mock_post):
+    mock_post.side_effect = [
+        completion(None, reasoning_content="private reasoning"),
+        completion("I'm here."),
+    ]
+    provider = NimProvider(api_key="test-key", model="nvidia/nemotron-3-super-120b-a12b")
+    provider.fallback_model = "meta/llama-3.2-90b-vision-instruct"
+    response = provider.send("Are you good?", max_tokens=400)
+    assert response.content == "I'm here."
+    assert response.model == provider.fallback_model
+    initial = mock_post.call_args_list[0].kwargs["json"]
+    backup = mock_post.call_args_list[1].kwargs["json"]
+    assert initial["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "chat_template_kwargs" not in backup
+    assert mock_post.call_count == 2
+
+
+@patch("httpx.Client.post")
+@pytest.mark.parametrize("content", [None, "", "<think>private reasoning</think>"])
+def test_nim_empty_replies_fail_clearly_after_one_backup(mock_post, content):
+    mock_post.side_effect = [completion(content), completion(content)]
+    provider = NimProvider(api_key="test-key", model="nvidia/nemotron-3-super-120b-a12b")
+    provider.fallback_model = "meta/backup"
+    with pytest.raises(RuntimeError, match="no user-visible answer"):
+        provider.send("Hello")
+    assert mock_post.call_count == 2
+
+
+@patch("httpx.Client.post")
+def test_nim_caller_can_explicitly_enable_reasoning(mock_post):
+    mock_post.return_value = completion("visible answer", reasoning_content="private thoughts")
+    provider = NimProvider(api_key="test-key", model="nvidia/nemotron-3-super-120b-a12b")
+    template = {"enable_thinking": True, "low_effort": True}
+    assert (
+        provider.send("A complex query", chat_template_kwargs=template).content == "visible answer"
+    )
+    assert mock_post.call_args.kwargs["json"]["chat_template_kwargs"] == template
+    assert template == {"enable_thinking": True, "low_effort": True}
+
+
+def test_nim_template_options_are_model_specific_for_streams():
+    payload = {"model": "nvidia/nemotron-3-super-120b-a12b", "stream": True}
+    assert NimProvider._model_payload(payload, payload["model"])["chat_template_kwargs"] == {
+        "enable_thinking": False,
+    }
+    assert "chat_template_kwargs" not in NimProvider._model_payload(payload, "meta/backup")
+    assert "chat_template_kwargs" not in payload
+
+
+@patch("httpx.Client.post")
+@patch("raphael.providers.nim.time.sleep")
+def test_nim_transient_http_errors_retry_then_use_backup(mock_sleep, mock_post):
+    import httpx
+
+    request = httpx.Request("POST", "https://example.test/completions")
+    response = httpx.Response(503, request=request)
+    errors = [
+        httpx.HTTPStatusError("Unavailable", request=request, response=response) for _ in range(3)
+    ]
+    mock_post.side_effect = [*errors, completion("backup answer")]
+    provider = NimProvider(api_key="test-key", model="nvidia/nemotron-3-super-120b-a12b")
+    provider.fallback_model = "meta/backup"
+    assert provider.send("Hello").content == "backup answer"
+    assert mock_post.call_count == 4
+    assert mock_sleep.call_count == 2  # No pointless delay after the last failure.
