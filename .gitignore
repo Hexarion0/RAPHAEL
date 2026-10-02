@@ -14,9 +14,14 @@ models/tts/
 *.onnx
 *.db
 *.sqlite3
+/:memory:.ses
 
-# Local training artifacts & piper datasets
-training/
+# Local training artifacts & piper datasets (keep the raw drop folder)
+training/**
+!training/raw/
+!training/raw/.gitkeep
+training/raw/**
+!training/raw/.gitkeep
 checkpoints/
 results/
 
@@ -234,3 +239,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local contributor instructions
+/AGENTS.md
