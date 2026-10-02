@@ -4,11 +4,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-import onnx
-import openwakeword.utils
 import soundfile as sf
-from onnx import TensorProto, helper
-from sklearn.linear_model import LogisticRegression
 
 from raphael.logging import get_logger
 from raphael.platform import get_audio_backend
@@ -74,6 +70,16 @@ def train_custom_wakeword(
     phrase_name: str = "hey_raphael",
 ) -> Path:
     """Train and export an openWakeWord-compatible ONNX model from recorded voice samples."""
+    try:
+        import onnx
+        import openwakeword.utils
+        from onnx import TensorProto, helper
+        from sklearn.linear_model import LogisticRegression
+    except ImportError as err:
+        raise RuntimeError(
+            'Wake training dependencies are missing. Install with: pip install -e ".[train]"'
+        ) from err
+
     samples_path = Path(samples_dir)
     wav_files = list(samples_path.glob("*.wav"))
 

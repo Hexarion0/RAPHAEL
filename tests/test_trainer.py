@@ -5,11 +5,13 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
+import pytest
 import soundfile as sf
 
 from raphael.audio.trainer import train_custom_wakeword
 
 
+@pytest.mark.integration
 def test_train_custom_wakeword_synthetic():
     """Verify training and ONNX export from synthetic audio samples."""
     with tempfile.TemporaryDirectory() as tmpdir:
