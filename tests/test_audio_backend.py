@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from raphael.platform import get_audio_backend
@@ -74,6 +75,7 @@ def test_save_wav():
         assert len(data) == len(sine_wave)
 
 
+@pytest.mark.integration
 def test_backend_device_listing():
     """Verify that backend can discover host audio devices without errors."""
     backend = get_audio_backend()
@@ -84,3 +86,22 @@ def test_backend_device_listing():
     output_devs = backend.list_output_devices()
     assert isinstance(input_devs, list)
     assert isinstance(output_devs, list)
+
+
+def test_resolve_devices_by_numeric_string_and_name(monkeypatch):
+    backend = LinuxAudioBackend()
+    devices = [
+        AudioDeviceInfo(
+            index=7,
+            name="USB Headset",
+            hostapi="test",
+            max_input_channels=1,
+            max_output_channels=2,
+            default_samplerate=16000,
+        )
+    ]
+    monkeypatch.setattr(backend, "list_input_devices", lambda: devices)
+    monkeypatch.setattr(backend, "list_output_devices", lambda: devices)
+    for is_input in (True, False):
+        assert backend.resolve_device("3", is_input=is_input) == 3
+        assert backend.resolve_device("Headset", is_input=is_input) == 7

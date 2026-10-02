@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import sounddevice as sd
 import soundfile as sf
 
+from raphael.audio.native import sd
+from raphael.config import normalize_audio_device
 from raphael.logging import get_logger
 from raphael.platform.base import AudioBackend, AudioDeviceInfo
 
@@ -72,6 +73,7 @@ class LinuxAudioBackend(AudioBackend):
 
     def resolve_device(self, device: int | str | None, is_input: bool = True) -> int | None:
         """Resolve a device specification (int index, string query, or None) to an index."""
+        device = normalize_audio_device(device)
         if device is None:
             default_dev = (
                 self.get_default_input_device() if is_input else self.get_default_output_device()

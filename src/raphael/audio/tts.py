@@ -9,20 +9,71 @@ import edge_tts
 import msgpack
 import numpy as np
 import requests
-import sounddevice as sd
 import soundfile as sf
 from piper import PiperVoice
 from piper.config import SynthesisConfig
 from piper.download_voices import download_voice
 
-from raphael.config import get_settings
+from raphael.audio.native import sd
+from raphael.config import get_settings, normalize_audio_device
 from raphael.logging import get_logger
 
 logger = get_logger("audio.tts")
 
+_CUSTOM_PIPER_VOICES = {"custom_voice", "custom"}
+
+
+def resolve_tts_engine(voice_name: str, engine: str = "auto") -> str:
+    """An explicit engine wins; otherwise choose the engine for the voice."""
+    selected = engine.lower()
+    if selected == "fish":
+        selected = "fish_speech"
+    if selected == "auto":
+        if voice_name.lower() in {"mommy", "fish_speech", "fish"}:
+            return "fish_speech"
+        if "neural" in voice_name.lower():
+            return "edge_tts"
+        return "piper"
+    if selected not in {"piper", "fish_speech", "edge_tts"}:
+        raise ValueError(f"Unknown TTS engine: {engine}")
+    return selected
+
+
+def resolve_piper_voice_paths(voice_name: str, models_dir: str | Path) -> tuple[Path, Path]:
+    """Resolve a Piper ONNX + config pair without starting any TTS server."""
+    models = Path(models_dir)
+    direct_path = Path(voice_name)
+    if direct_path.is_file() and direct_path.suffix == ".onnx":
+        json_file = direct_path.with_suffix(".onnx.json")
+        if not json_file.is_file():
+            json_file = direct_path.with_name(f"{direct_path.stem}.json")
+        return direct_path, json_file
+
+    models.mkdir(parents=True, exist_ok=True)
+    onnx_file = models / f"{voice_name}.onnx"
+    json_file = models / f"{voice_name}.onnx.json"
+    if not json_file.is_file():
+        alt_json = models / f"{voice_name}.json"
+        if alt_json.is_file():
+            json_file = alt_json
+
+    if voice_name.lower() in _CUSTOM_PIPER_VOICES or onnx_file.is_file():
+        if not onnx_file.is_file() or not json_file.is_file():
+            raise FileNotFoundError(
+                f"Custom Piper voice '{voice_name}' not found in {models}. "
+                "Run `python -m raphael prepare-voice` then `./scripts/train_piper_voice.sh`."
+            )
+        return onnx_file, json_file
+
+    if not onnx_file.is_file() or not json_file.is_file():
+        logger.info("Downloading Piper TTS voice model '%s'...", voice_name)
+        download_voice(voice_name, models)
+        logger.info("Successfully downloaded TTS voice '%s'.", voice_name)
+    return onnx_file, json_file
+
 
 class TextToSpeech:
-    """Neural Text-to-Speech engine supporting Fish Speech (zero-shot local cloning), Microsoft Edge-TTS, and Piper ONNX."""
+    """Neural speech using local Fish Speech, Microsoft Edge-TTS, or Piper ONNX."""
 
     def __init__(
         self,
@@ -45,71 +96,61 @@ class TextToSpeech:
 
         self.voice_name = voice_name if voice_name is not None else settings.tts_voice
         raw_engine = engine if engine is not None else settings.tts_engine
-        self.engine = raw_engine.lower()
-
-        # Auto-detect engine from voice name if engine not explicitly specified
-        if engine is None:
-            if self.voice_name.lower() in ("mommy", "fish_speech", "fish"):
-                self.engine = "fish_speech"
-            elif "neural" in self.voice_name.lower():
-                self.engine = "edge_tts"
-            elif self.voice_name.endswith(".onnx") or "medium" in self.voice_name.lower() or self.voice_name == "custom_voice":
-                self.engine = "piper"
+        self.engine = resolve_tts_engine(self.voice_name, raw_engine)
 
         self.models_dir = Path(models_dir)
         self.speed = speed if speed is not None else settings.tts_speed
-        self.output_device = output_device if output_device is not None else settings.output_device
+        self.output_device = normalize_audio_device(
+            output_device if output_device is not None else settings.output_device
+        )
         self.enabled = enabled
 
         # Fish Speech zero-shot parameters
         self.fish_speech_url = fish_speech_url or settings.fish_speech_url
         self.fish_ref_audio = fish_ref_audio or settings.fish_ref_audio
         self.fish_ref_text = fish_ref_text or settings.fish_ref_text
-        self.fish_temperature = fish_temperature if fish_temperature is not None else settings.fish_temperature
+        self.fish_temperature = (
+            fish_temperature if fish_temperature is not None else settings.fish_temperature
+        )
         self.fish_top_p = fish_top_p if fish_top_p is not None else settings.fish_top_p
-        self.fish_repetition_penalty = fish_repetition_penalty if fish_repetition_penalty is not None else settings.fish_repetition_penalty
-        self.fish_chunk_length = fish_chunk_length if fish_chunk_length is not None else settings.fish_chunk_length
-        self.fish_max_new_tokens = fish_max_new_tokens if fish_max_new_tokens is not None else settings.fish_max_new_tokens
+        self.fish_repetition_penalty = (
+            fish_repetition_penalty
+            if fish_repetition_penalty is not None
+            else settings.fish_repetition_penalty
+        )
+        self.fish_chunk_length = (
+            fish_chunk_length if fish_chunk_length is not None else settings.fish_chunk_length
+        )
+        self.fish_max_new_tokens = (
+            fish_max_new_tokens if fish_max_new_tokens is not None else settings.fish_max_new_tokens
+        )
 
         self._cached_ref_audio_bytes: bytes | None = None
         self._voice: PiperVoice | None = None
+        self._fallback_voice: PiperVoice | None = None
         self._is_playing = False
+        self._playback_lock = threading.Lock()
+        self._playback_generation = 0
         self._stop_event = threading.Event()  # signals stop() to unblock speak(block=True)
 
         if self.enabled:
-            logger.info("Initializing TTS engine '%s' with voice '%s'...", self.engine, self.voice_name)
+            logger.info(
+                "Initializing TTS engine '%s' with voice '%s'...", self.engine, self.voice_name
+            )
             if self.engine == "piper":
                 self._load_voice()
             elif self.engine in ("fish_speech", "fish"):
-                logger.info("Fish Speech zero-shot engine ready (URL: %s, Voice: %s).", self.fish_speech_url, self.voice_name)
+                logger.info(
+                    "Fish Speech zero-shot engine ready (URL: %s, Voice: %s).",
+                    self.fish_speech_url,
+                    self.voice_name,
+                )
             else:
                 logger.info("Edge-TTS engine ready (voice: %s).", self.voice_name)
 
     def _ensure_model_files(self) -> tuple[Path, Path]:
         """Ensure voice model .onnx and .onnx.json files exist locally, downloading if necessary."""
-        # 1. Check if direct file path was provided
-        direct_path = Path(self.voice_name)
-        if direct_path.is_file() and direct_path.suffix == ".onnx":
-            json_file = direct_path.with_suffix(".onnx.json")
-            if not json_file.is_file():
-                json_file = direct_path.with_name(f"{direct_path.stem}.json")
-            return direct_path, json_file
-
-        # 2. Check in models directory
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-        onnx_file = self.models_dir / f"{self.voice_name}.onnx"
-        json_file = self.models_dir / f"{self.voice_name}.onnx.json"
-
-        if not onnx_file.is_file() or not json_file.is_file():
-            logger.info("Downloading Piper TTS voice model '%s'...", self.voice_name)
-            try:
-                download_voice(self.voice_name, self.models_dir)
-                logger.info("Successfully downloaded TTS voice '%s'.", self.voice_name)
-            except Exception as err:
-                logger.error("Failed to download voice model '%s': %s", self.voice_name, err)
-                raise
-
-        return onnx_file, json_file
+        return resolve_piper_voice_paths(self.voice_name, self.models_dir)
 
     def _load_voice(self) -> None:
         """Load the Piper neural voice model."""
@@ -147,7 +188,11 @@ class TextToSpeech:
         if ref_path.is_file():
             try:
                 self._cached_ref_audio_bytes = ref_path.read_bytes()
-                logger.debug("Loaded reference audio (%d bytes) from %s", len(self._cached_ref_audio_bytes), ref_path)
+                logger.debug(
+                    "Loaded reference audio (%d bytes) from %s",
+                    len(self._cached_ref_audio_bytes),
+                    ref_path,
+                )
                 return self._cached_ref_audio_bytes
             except Exception as err:
                 logger.warning("Failed to read reference audio '%s': %s", ref_path, err)
@@ -187,10 +232,12 @@ class TextToSpeech:
         ref_bytes = self._get_ref_audio_bytes()
         references = []
         if ref_bytes is not None and self.fish_ref_text:
-            references.append({
-                "audio": ref_bytes,
-                "text": self.fish_ref_text,
-            })
+            references.append(
+                {
+                    "audio": ref_bytes,
+                    "text": self.fish_ref_text,
+                }
+            )
 
         payload = {
             "text": text,
@@ -234,14 +281,28 @@ class TextToSpeech:
             return self._fallback_synthesize(text)
 
     def _fallback_synthesize(self, text: str) -> tuple[np.ndarray, int] | None:
-        """Gracefully fall back to Edge-TTS or Piper when primary engine fails."""
-        try:
-            res = self._synthesize_edge_tts(text)
-            if res is not None:
-                return res
-        except Exception:
-            pass
-        return self._synthesize_piper(text)
+        """Use installed local voices before attempting a network-based fallback."""
+        if self._fallback_voice is not None:
+            return self._synthesize_piper(text, voice=self._fallback_voice)
+        for name in dict.fromkeys([self.voice_name, "en_GB-alan-medium", "en_US-amy-medium"]):
+            onnx = self.models_dir / f"{name}.onnx"
+            config = onnx.with_suffix(".onnx.json")
+            if not config.is_file():
+                config = onnx.with_suffix(".json")
+            if not onnx.is_file() or not config.is_file():
+                continue
+            try:
+                self._fallback_voice = PiperVoice.load(
+                    model_path=str(onnx),
+                    config_path=str(config),
+                    use_cuda=False,
+                )
+                logger.info("Using local Piper fallback voice '%s'.", name)
+                return self._synthesize_piper(text, voice=self._fallback_voice)
+            except Exception as err:
+                self._fallback_voice = None
+                logger.warning("Piper fallback '%s' failed: %s", name, err)
+        return self._synthesize_edge_tts(text)
 
     def _synthesize_edge_tts(self, text: str) -> tuple[np.ndarray, int] | None:
         """Synthesize using Microsoft Edge-TTS neural speech."""
@@ -280,11 +341,17 @@ class TextToSpeech:
             logger.warning("Edge-TTS synthesis failed (%s). Falling back to Piper...", err)
             return self._synthesize_piper(text)
 
-    def _synthesize_piper(self, text: str) -> tuple[np.ndarray, int] | None:
+    def _synthesize_piper(
+        self,
+        text: str,
+        voice: PiperVoice | None = None,
+    ) -> tuple[np.ndarray, int] | None:
         """Synthesize using local Piper ONNX model."""
-        if self._voice is None:
-            self._load_voice()
-        if self._voice is None:
+        if voice is None:
+            if self._voice is None:
+                self._load_voice()
+            voice = self._voice
+        if voice is None:
             return None
 
         syn_config = SynthesisConfig(
@@ -294,7 +361,7 @@ class TextToSpeech:
         audio_chunks: list[np.ndarray] = []
         sample_rate = 22050
 
-        for chunk in self._voice.synthesize(text, syn_config=syn_config):
+        for chunk in voice.synthesize(text, syn_config=syn_config):
             sample_rate = chunk.sample_rate
             if chunk.audio_float_array is not None and chunk.audio_float_array.size > 0:
                 audio_chunks.append(chunk.audio_float_array)
@@ -314,9 +381,9 @@ class TextToSpeech:
         if not clean_text:
             return None
 
-        if self.engine in ("fish_speech", "fish") or self.voice_name.lower() == "mommy":
+        if self.engine == "fish_speech":
             return self._synthesize_fish_speech(clean_text)
-        elif self.engine == "edge_tts" or "neural" in self.voice_name.lower():
+        elif self.engine == "edge_tts":
             return self._synthesize_edge_tts(clean_text)
         return self._synthesize_piper(clean_text)
 
@@ -325,6 +392,8 @@ class TextToSpeech:
         if not self.enabled:
             return False
 
+        with self._playback_lock:
+            generation = self._playback_generation
         synth_result = self.synthesize(text)
         if synth_result is None:
             return False
@@ -332,9 +401,12 @@ class TextToSpeech:
         audio, sample_rate = synth_result
 
         try:
-            self._stop_event.clear()
-            self._is_playing = True
-            sd.play(audio, samplerate=sample_rate, device=self.output_device)
+            with self._playback_lock:
+                if generation != self._playback_generation:
+                    return False
+                self._stop_event.clear()
+                self._is_playing = True
+                sd.play(audio, samplerate=sample_rate, device=self.output_device)
             if block:
                 # Poll our stop_event instead of calling sd.wait() directly.
                 # On Linux, sd.stop() does not reliably unblock a concurrent sd.wait()
@@ -345,9 +417,11 @@ class TextToSpeech:
                             break
                     except Exception:
                         break  # stream gone — playback finished
-                self._is_playing = False
+                with self._playback_lock:
+                    if generation == self._playback_generation:
+                        self._is_playing = False
             else:
-                # Spawn a daemon thread to clear _is_playing once audio finishes or stop is requested
+                # Clear playback state when audio finishes or stop is requested.
                 def _wait_done() -> None:
                     try:
                         while not self._stop_event.wait(timeout=0.02):
@@ -357,7 +431,9 @@ class TextToSpeech:
                             except Exception:
                                 break
                     finally:
-                        self._is_playing = False
+                        with self._playback_lock:
+                            if generation == self._playback_generation:
+                                self._is_playing = False
 
                 threading.Thread(target=_wait_done, daemon=True).start()
             return True
@@ -368,7 +444,13 @@ class TextToSpeech:
 
     def stop(self) -> None:
         """Immediately stop audio playback (barge-in support)."""
-        self._stop_event.set()  # unblocks any speak(block=True) polling loop
+        with self._playback_lock:
+            self._playback_generation += 1
+            self._stop_event.set()
+            was_playing = self._is_playing
+            self._is_playing = False
+        if not was_playing:
+            return
         try:
             sd.stop()
         except Exception as err:
@@ -383,7 +465,12 @@ class TextToSpeech:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test RAPHAEL Text-to-Speech")
-    parser.add_argument("text", nargs="?", default="Hello! I am Raphael, your desktop companion.", help="Text to speak")
+    parser.add_argument(
+        "text",
+        nargs="?",
+        default="Hello! I am Raphael, your desktop companion.",
+        help="Text to speak",
+    )
     parser.add_argument("--engine", default=None, help="TTS engine (fish_speech, edge_tts, piper)")
     parser.add_argument("--voice", default=None, help="TTS voice name")
     args = parser.parse_args()

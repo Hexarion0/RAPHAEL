@@ -2,8 +2,19 @@
 
 from functools import lru_cache
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def normalize_audio_device(value: int | str | None) -> int | str | None:
+    """Normalize environment indices while retaining device name queries."""
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        if value.isdecimal():
+            return int(value)
+    return value
 
 
 class AppConfig(BaseModel):
@@ -98,13 +109,15 @@ class AudioConfig(BaseModel):
         default="en",
         description="Primary language code for STT transcription",
     )
+    stt_beam_size: int = Field(default=3, ge=1, le=10)
+    utterance_silence_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
     tts_engine: str = Field(
-        default="fish_speech",
-        description="TTS Engine (fish_speech for local zero-shot, edge_tts for Microsoft Neural AI, or piper for local ONNX)",
+        default="auto",
+        description=("TTS engine: auto (follow voice), piper, edge_tts, or fish_speech"),
     )
     tts_voice: str = Field(
         default="mommy",
-        description="TTS voice name (e.g. mommy, en-US-AvaNeural, en-US-JennyNeural, custom_voice)",
+        description="TTS voice name (custom_voice, en_GB-alan-medium, en-US-AvaNeural, mommy)",
     )
     tts_speed: float = Field(
         default=1.0,
@@ -123,13 +136,20 @@ class AudioConfig(BaseModel):
         description="Path to reference audio for zero-shot voice cloning",
     )
     fish_ref_text: str = Field(
-        default="Oh my god, did I like break your ribs or something? It's not my fault that you're fragile.",
+        default=(
+            "Oh my god, did I like break your ribs or something? "
+            "It's not my fault that you're fragile."
+        ),
         description="Transcript of reference audio for zero-shot voice cloning",
     )
     fish_temperature: float = Field(default=0.7, description="Fish Speech sampling temperature")
     fish_top_p: float = Field(default=0.7, description="Fish Speech top_p sampling")
-    fish_repetition_penalty: float = Field(default=1.2, description="Fish Speech repetition penalty")
-    fish_chunk_length: int = Field(default=200, description="Fish Speech chunk length for synthesis")
+    fish_repetition_penalty: float = Field(
+        default=1.2, description="Fish Speech repetition penalty"
+    )
+    fish_chunk_length: int = Field(
+        default=200, description="Fish Speech chunk length for synthesis"
+    )
     fish_max_new_tokens: int = Field(default=1024, description="Fish Speech max new tokens")
     sample_rate: int = Field(default=16000, description="Audio sample rate in Hz")
     channels: int = Field(default=1, description="Audio channel count (1 for mono)")
@@ -141,6 +161,12 @@ class AudioConfig(BaseModel):
         default=None,
         description="Speaker device index or substring name",
     )
+
+    @field_validator("input_device", "output_device", mode="before")
+    @classmethod
+    def parse_device(cls, value: int | str | None) -> int | str | None:
+        """Accept indices and names for direct audio configuration."""
+        return normalize_audio_device(value)
 
 
 class Settings(BaseSettings):
@@ -179,14 +205,19 @@ class Settings(BaseSettings):
     stt_device: str = Field(default="cpu")
     stt_compute_type: str = Field(default="int8")
     stt_language: str = Field(default="en")
-    tts_engine: str = Field(default="fish_speech")
+    stt_beam_size: int = Field(default=3, ge=1, le=10)
+    utterance_silence_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
+    tts_engine: str = Field(default="auto")
     tts_voice: str = Field(default="mommy")
     tts_speed: float = Field(default=1.0)
     tts_enabled: bool = Field(default=True)
     fish_speech_url: str = Field(default="http://127.0.0.1:8080/v1/tts")
     fish_ref_audio: str = Field(default="data/voices/mommy/ref.wav")
     fish_ref_text: str = Field(
-        default="Oh my god, did I like break your ribs or something? It's not my fault that you're fragile."
+        default=(
+            "Oh my god, did I like break your ribs or something? "
+            "It's not my fault that you're fragile."
+        )
     )
     fish_temperature: float = Field(default=0.7)
     fish_top_p: float = Field(default=0.7)
@@ -197,6 +228,12 @@ class Settings(BaseSettings):
     audio_channels: int = Field(default=1)
     audio_input_device: int | str | None = Field(default=None)
     audio_output_device: int | str | None = Field(default=None)
+
+    @field_validator("audio_input_device", "audio_output_device", mode="before")
+    @classmethod
+    def parse_device(cls, value: int | str | None) -> int | str | None:
+        """Parse device selections loaded from environment variables."""
+        return normalize_audio_device(value)
 
     @property
     def app(self) -> AppConfig:
@@ -239,6 +276,8 @@ class Settings(BaseSettings):
             stt_device=self.stt_device,
             stt_compute_type=self.stt_compute_type,
             stt_language=self.stt_language,
+            stt_beam_size=self.stt_beam_size,
+            utterance_silence_seconds=self.utterance_silence_seconds,
             tts_engine=self.tts_engine,
             tts_voice=self.tts_voice,
             tts_speed=self.tts_speed,
