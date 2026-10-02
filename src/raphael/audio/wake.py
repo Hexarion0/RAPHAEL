@@ -1,16 +1,15 @@
 """Continuous wake word detection engine supporting openWakeWord and 'Hey Raphael'."""
 
 import os
+import queue
 import re
+import threading
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import openwakeword
-from faster_whisper import WhisperModel
-from openwakeword.model import Model
 
 from raphael.logging import get_logger
 
@@ -48,7 +47,7 @@ class WakeWordDetector:
         if model_paths:
             logger.info("Initializing openWakeWord detector with models: %s", model_paths)
             try:
-                self.model = Model(wakeword_model_paths=model_paths)
+                self.model = self._load_wake_model(model_paths)
                 self.available_models = list(self.model.models.keys())
                 logger.info("Loaded openWakeWord models: %s", self.available_models)
             except Exception as err:
@@ -68,21 +67,86 @@ class WakeWordDetector:
         self._speech_frames_count = 0
         self._last_spotter_check = 0.0
         self._ambient_rms = 0.01
-        self._spotter_model: WhisperModel | None = None
-
+        self._spotter_model: Any = None
+        self._spotter_lock = threading.Lock()
+        self._generation = 0
+        self._spotter_result: tuple[int, str] | None = None
+        self._spotter_requests: queue.Queue = queue.Queue(maxsize=1)
+        self._spotter_stop = threading.Event()
+        self._spotter_thread: threading.Thread | None = None
         if self.enable_whisper_spotter:
+            self.start()
+
+    @staticmethod
+    def _load_wake_model(paths):
+        from openwakeword.model import Model
+
+        return Model(wakeword_model_paths=paths)
+
+    @staticmethod
+    def _load_spotter_model():
+        from faster_whisper import WhisperModel
+
+        return WhisperModel("tiny.en", device="cpu", compute_type="int8", cpu_threads=2)
+
+    def start(self) -> None:
+        """Load and run the keyword spotter separately from incoming audio."""
+        if not self.enable_whisper_spotter:
+            return
+        if self._spotter_thread and self._spotter_thread.is_alive():
+            if self._spotter_stop.is_set():
+                raise RuntimeError("Previous keyword spotter is still stopping")
+            return
+        self._spotter_stop = threading.Event()
+        self._spotter_requests = queue.Queue(maxsize=1)
+        self._spotter_thread = threading.Thread(target=self._spotter_worker, daemon=True)
+        self._spotter_thread.start()
+
+    def stop(self) -> None:
+        self._spotter_stop.set()
+        if self._spotter_thread and self._spotter_thread is not threading.current_thread():
+            self._spotter_thread.join(timeout=1.0)
+
+    def _spotter_worker(self) -> None:
+        try:
+            if self._spotter_model is None:
+                self._spotter_model = self._load_spotter_model()
+        except Exception as err:
+            logger.error("Failed to initialize keyword spotter: %s", err)
+            return
+        while not self._spotter_stop.is_set():
             try:
-                self._spotter_model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
-                logger.info("Initialized keyword wake spotter for target: '%s'", self.wake_phrase)
+                generation, audio = self._spotter_requests.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                with self._spotter_lock:
+                    if generation != self._generation:
+                        continue
+                segments, _ = self._spotter_model.transcribe(
+                    audio,
+                    language="en",
+                    beam_size=1,
+                    initial_prompt=self.wake_phrase,
+                    without_timestamps=True,
+                    condition_on_previous_text=False,
+                )
+                text = " ".join(segment.text.strip() for segment in segments)
+                with self._spotter_lock:
+                    if generation == self._generation and not self._spotter_stop.is_set():
+                        self._spotter_result = (generation, text)
             except Exception as err:
-                logger.warning("Failed to initialize keyword spotter: %s", err)
-                self._spotter_model = None
+                logger.debug("Keyword spotter failed: %s", err)
+            finally:
+                self._spotter_requests.task_done()
 
     @staticmethod
     def _resolve_model_paths(models: list[str] | None) -> list[str]:
         """Resolve model names to full paths. Returns [] when no models are requested."""
         if not models:
             return []  # No models → Whisper-only mode, do NOT load all pretrained models
+
+        import openwakeword
 
         pretrained_paths = openwakeword.get_pretrained_model_paths()
         resolved: list[str] = []
@@ -145,59 +209,57 @@ class WakeWordDetector:
                         "timestamp": now,
                     }
 
-        # 2. Check keyword spotter for "Raphael" / "Hey Raphael"
-        if self._spotter_model is not None:
+        # Consume completed inference without ever waiting for Whisper.
+        with self._spotter_lock:
+            completed = self._spotter_result
+            self._spotter_result = None
+        if completed is not None:
+            generation, transcription = completed
+            if generation == self._generation:
+                patterns = self.WAKE_PATTERNS if "raphael" in self.wake_phrase else []
+                matched = self.wake_phrase in transcription.lower() or any(
+                    pattern.search(transcription) for pattern in patterns
+                )
+                if matched:
+                    self.last_trigger_time = now
+                    self.reset(set_cooldown=True)
+                    return {
+                        "model": "whisper_keyword",
+                        "score": 1.0,
+                        "timestamp": now,
+                        "text": transcription,
+                    }
+
+        if self.enable_whisper_spotter:
             self._sliding_buffer.extend(float_chunk)
-
-            chunk_rms = float(np.sqrt(np.mean(float_chunk**2))) if float_chunk.size > 0 else 0.0
-
-            # Dynamic noise estimate
-            if chunk_rms < 0.03:
-                self._ambient_rms = 0.95 * self._ambient_rms + 0.05 * chunk_rms
-
-            # Detect voice energy burst with adaptive threshold
-            is_speech = chunk_rms > max(0.012, self._ambient_rms * 1.5)
-            if is_speech:
+            rms = float(np.sqrt(np.mean(float_chunk**2))) if float_chunk.size else 0.0
+            if rms < 0.03:
+                self._ambient_rms = 0.95 * self._ambient_rms + 0.05 * rms
+            if rms > max(0.012, self._ambient_rms * 1.5):
                 self._speech_frames_count += 1
             else:
                 self._speech_frames_count = max(0, self._speech_frames_count - 1)
-
-            # Check Whisper when speech has accumulated (~0.2s to 0.5s)
             if (
-                self._speech_frames_count >= 2
+                self._spotter_model is not None
+                and self._speech_frames_count >= 2
                 and len(self._sliding_buffer) >= 8000
-                and (now - self._last_spotter_check >= 0.25)
+                and now - self._last_spotter_check >= 0.25
             ):
                 self._last_spotter_check = now
-                buffer_array = np.array(self._sliding_buffer, dtype=np.float32)
-
+                request = (self._generation, np.array(self._sliding_buffer, dtype=np.float32))
+                # Keep only the newest pending snapshot if inference falls behind.
                 try:
-                    segments, _ = self._spotter_model.transcribe(
-                        buffer_array,
-                        language="en",
-                        beam_size=1,
-                        initial_prompt="Hey Raphael, Rafael",
-                        without_timestamps=True,
-                    )
-                    transcription = " ".join(s.text.strip() for s in segments)
-
-                    for pattern in self.WAKE_PATTERNS:
-                        if pattern.search(transcription):
-                            self.last_trigger_time = now
-                            logger.info(
-                                "🎯 Wake word '%s' detected! (Transcription: '%s')",
-                                self.wake_phrase,
-                                transcription,
-                            )
-                            self.reset(set_cooldown=True)
-                            return {
-                                "model": f"keyword_{self.wake_phrase.replace(' ', '_')}",
-                                "score": 0.95,
-                                "timestamp": now,
-                            }
-                except Exception as err:
-                    logger.debug("Keyword spotter error: %s", err)
-
+                    self._spotter_requests.put_nowait(request)
+                except queue.Full:
+                    try:
+                        self._spotter_requests.get_nowait()
+                        self._spotter_requests.task_done()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._spotter_requests.put_nowait(request)
+                    except queue.Full:
+                        pass
         return None
 
     def reset(self, set_cooldown: bool = False) -> None:
@@ -209,6 +271,9 @@ class WakeWordDetector:
             for _ in range(8):
                 self.model.predict(silence)
 
+        with self._spotter_lock:
+            self._generation += 1
+            self._spotter_result = None
         self._sliding_buffer.clear()
         self._speech_frames_count = 0
         self._last_spotter_check = time.time()

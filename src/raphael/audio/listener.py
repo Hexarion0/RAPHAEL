@@ -1,26 +1,29 @@
-"""High-level wake-word listening loop, event pipeline, and barge-in interruption."""
+"""Bounded audio ingestion, wake detection, recording, and conversation workers."""
+
+from __future__ import annotations
 
 import queue
 import threading
+from collections import deque
 from collections.abc import Callable
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from raphael.audio.recorder import VoiceRecorder
-from raphael.audio.stt import SpeechToText
-from raphael.audio.tts import TextToSpeech
 from raphael.audio.wake import WakeWordDetector
 from raphael.logging import get_logger
-from raphael.platform.base import AudioBackend
+
+if TYPE_CHECKING:
+    from raphael.audio.stt import SpeechToText
+    from raphael.audio.tts import TextToSpeech
+    from raphael.platform.base import AudioBackend
 
 logger = get_logger("audio.listener")
 
 
 class ListenerState(str, Enum):
-    """Lifecycle states of the voice assistant listener."""
-
     IDLE = "idle"
     LISTENING_WAKE = "listening_wake"
     WAKE_DETECTED = "wake_detected"
@@ -29,7 +32,7 @@ class ListenerState(str, Enum):
 
 
 class WakeListenerLoop:
-    """Coordinates audio backend streaming, wake word detection, utterance recording, and STT."""
+    """Keep microphone callbacks independent of inference and user callbacks."""
 
     def __init__(
         self,
@@ -47,226 +50,247 @@ class WakeListenerLoop:
         device: int | str | None = None,
         barge_in: bool = True,
         barge_in_threshold_rms: float = 0.030,
+        stt_beam_size: int = 3,
     ) -> None:
         self.backend = audio_backend
         self.detector = detector or WakeWordDetector()
         self.recorder = recorder or VoiceRecorder(sample_rate=sample_rate)
-        self.stt = stt
-        self.tts = tts
-        self.on_wake = on_wake
-        self.on_utterance = on_utterance
-        self.on_transcription = on_transcription
-        self.on_barge_in = on_barge_in
+        self.stt, self.tts = stt, tts
+        self.on_wake, self.on_utterance = on_wake, on_utterance
+        self.on_transcription, self.on_barge_in = on_transcription, on_barge_in
         self.on_state_change = on_state_change
-        self.sample_rate = sample_rate
-        self.device = device
-        self.barge_in = barge_in
-        self.barge_in_threshold_rms = barge_in_threshold_rms
-
+        self.sample_rate, self.device = sample_rate, device
+        self.barge_in, self.barge_in_threshold_rms = barge_in, barge_in_threshold_rms
+        self.stt_beam_size = stt_beam_size
         self._state = ListenerState.IDLE
         self._last_wake_info: dict[str, Any] = {}
         self._lock = threading.Lock()
         self._running = False
-        self._processing_queue: queue.Queue[tuple[np.ndarray, dict[str, Any]] | None] = (
-            queue.Queue()
-        )
-        self._worker_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._frame_queue: queue.Queue = queue.Queue(maxsize=8)
+        self._processing_queue: queue.Queue = queue.Queue(maxsize=4)
+        self._notifications: queue.Queue = queue.Queue(maxsize=32)
+        self._threads: list[threading.Thread] = []
+        self._recent_audio: deque = deque(maxlen=max(1, round(sample_rate * 1.5 / 1280)))
+        self._recording_generation = 0
+        self.dropped_frames = 0
 
     @property
     def state(self) -> ListenerState:
-        """Current listener state."""
         return self._state
 
-    def _set_state(self, new_state: ListenerState) -> None:
-        if self._state != new_state:
-            self._state = new_state
-            logger.debug("Listener state changed to: %s", new_state.value)
-            if self.on_state_change:
-                try:
-                    self.on_state_change(new_state)
-                except Exception as err:
-                    logger.error("Error in state change callback: %s", err)
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
-    def _process_worker(self) -> None:
-        """Background worker thread to execute STT transcription and on_transcription."""
-        while self._running:
+    @staticmethod
+    def _offer(target: queue.Queue, item: Any) -> bool:
+        """Never block producers; replace the oldest item if the consumer falls behind."""
+        try:
+            target.put_nowait(item)
+            return False
+        except queue.Full:
             try:
-                item = self._processing_queue.get(timeout=0.2)
+                target.get_nowait()
+                target.task_done()
+            except queue.Empty:
+                pass
+            try:
+                target.put_nowait(item)
+            except queue.Full:
+                pass
+            return True
+
+    def _notify(self, callback: Callable | None, *args: Any) -> None:
+        if callback:
+            self._offer(self._notifications, (callback, args))
+
+    def _set_state(self, state: ListenerState) -> None:
+        if self._state != state:
+            self._state = state
+            self._notify(self.on_state_change, state)
+
+    def _notification_worker(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                callback, args = self._notifications.get(timeout=0.1)
             except queue.Empty:
                 continue
-
-            if item is None:
-                break
-
-            audio_data, wake_info = item
             try:
-                text = ""
-                if self.stt and len(audio_data) > 0:
-                    try:
-                        logger.info("Transcribing speech with Whisper...")
-                        text = self.stt.transcribe(audio_data)
-                        logger.info("🗣️ Transcribed: '%s'", text)
-                    except Exception as err:
-                        logger.error("STT transcription error: %s", err)
+                if not self._stop_event.is_set():
+                    callback(*args)
+            except Exception:
+                logger.exception("Listener notification failed")
+            finally:
+                self._notifications.task_done()
 
-                keep_listening = False
-                if self.on_transcription:
-                    try:
-                        result = self.on_transcription(text, wake_info, audio_data)
-                        keep_listening = bool(result) if result is not None else False
-                    except Exception as err:
-                        logger.error("Error in on_transcription callback: %s", err)
+    def _audio_callback(self, indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
+        """Copy borrowed audio and enqueue it; never run inference or take the state lock."""
+        if self._running:
+            if self._offer(self._frame_queue, indata.copy()):
+                self.dropped_frames += 1
 
-                try:
-                    with self._lock:
-                        if self._state == ListenerState.RECORDING:
-                            if not keep_listening:
-                                # A barge-in or follow-up recording is active but the
-                                # transcription result says we should end the session
-                                # (e.g. farewell or stop command). Cancel the recording.
-                                self.recorder._is_recording = False
-                                self.detector.reset(set_cooldown=True)
-                                self._set_state(ListenerState.LISTENING_WAKE)
-                            # else: recording already in progress — let it continue
-                        elif self._state == ListenerState.PROCESSING:
-                            if keep_listening:
-                                logger.info(
-                                    "👂 Follow-up mode active — speak next request or say 'Goodbye'."
-                                )
-                                self.recorder.start()
-                                self._set_state(ListenerState.RECORDING)
-                            else:
-                                self.detector.reset(set_cooldown=True)
-                                self._set_state(ListenerState.LISTENING_WAKE)
-                except Exception as err:
-                    logger.error("Error during state transition in worker — recovering to LISTENING_WAKE: %s", err)
-                    try:
-                        with self._lock:
-                            self.detector.reset(set_cooldown=False)
-                            self._set_state(ListenerState.LISTENING_WAKE)
-                    except Exception as inner_err:
-                        logger.error("Failed to recover state: %s", inner_err)
+    def _start_recording(self) -> None:
+        self._recording_generation += 1
+        self.recorder.start()
+        self._set_state(ListenerState.RECORDING)
 
-            except Exception as err:
-                logger.error("Unhandled error in processing worker — recovering: %s", err)
-                try:
-                    with self._lock:
+    def _frame_worker(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                audio = self._frame_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                with self._lock:
+                    if not self._running:
+                        continue
+                    self._handle_frame(audio)
+            except Exception:
+                logger.exception("Audio frame processing failed")
+                with self._lock:
+                    if self._running:
                         self.detector.reset(set_cooldown=False)
                         self._set_state(ListenerState.LISTENING_WAKE)
-                except Exception as inner_err:
-                    logger.error("Failed to recover state after unhandled error: %s", inner_err)
+            finally:
+                self._frame_queue.task_done()
+
+    def _handle_frame(self, audio: np.ndarray) -> None:
+        if (
+            self.barge_in
+            and self.tts
+            and self.tts.is_speaking()
+            and self._state != ListenerState.RECORDING
+        ):
+            if VoiceRecorder.calculate_rms(
+                audio
+            ) >= self.barge_in_threshold_rms or self.detector.process_frame(audio):
+                self.tts.stop()
+                self._start_recording()
+                self.recorder.add_frame(audio)
+                self._notify(self.on_barge_in)
+                return
+        if self._state == ListenerState.LISTENING_WAKE:
+            self._recent_audio.append(audio)
+            trigger = self.detector.process_frame(audio)
+            if trigger:
+                self._last_wake_info = trigger
+                self._set_state(ListenerState.WAKE_DETECTED)
+                self._start_recording()
+                # Async wake inference can finish after the user starts the command.
+                for recent in self._recent_audio:
+                    self.recorder.add_frame(recent)
+                self._recent_audio.clear()
+                self._notify(self.on_wake, trigger)
+        elif self._state == ListenerState.RECORDING:
+            if not self.recorder._speech_started:
+                trigger = self.detector.process_frame(audio)
+                if trigger:
+                    self._last_wake_info = trigger
+                    self._start_recording()
+                    self.recorder.add_frame(audio)
+                    self._notify(self.on_wake, trigger)
+                    return
+            if not self.recorder.add_frame(audio):
+                recorded = self.recorder.get_audio()
+                info = self._last_wake_info.copy()
+                self._offer(self._processing_queue, (recorded, info, self._recording_generation))
+                self._set_state(ListenerState.PROCESSING)
+                self._notify(self.on_utterance, recorded, info)
+
+    def _process_worker(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                audio, info, generation = self._processing_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                if not self._running or generation != self._recording_generation:
+                    continue
+                text = (
+                    self.stt.transcribe(audio, beam_size=self.stt_beam_size)
+                    if (self.stt and audio.size)
+                    else ""
+                )
+                if not self._running:
+                    continue
+                keep_listening = (
+                    bool(self.on_transcription(text, info, audio))
+                    if (self.on_transcription)
+                    else False
+                )
+                with self._lock:
+                    # A completed old response cannot cancel a new barge-in recording.
+                    if not self._running or generation != self._recording_generation:
+                        continue
+                    if keep_listening:
+                        self._start_recording()
+                    else:
+                        self._recent_audio.clear()
+                        self.detector.reset(set_cooldown=True)
+                        self._set_state(ListenerState.LISTENING_WAKE)
+            except Exception:
+                logger.exception("Utterance processing failed")
+                with self._lock:
+                    if self._running and generation == self._recording_generation:
+                        self.detector.reset(set_cooldown=False)
+                        self._set_state(ListenerState.LISTENING_WAKE)
             finally:
                 self._processing_queue.task_done()
 
-    def _audio_callback(
-        self,
-        indata: np.ndarray,
-        frames: int,
-        time_info: Any,
-        status: Any,
-    ) -> None:
-        """Audio stream callback triggered for every audio buffer chunk."""
-        if not self._running:
-            return
-
-        with self._lock:
-            # 1. Real-time Barge-In Interruption Check
-            if (
-                self.barge_in
-                and self.tts
-                and self.tts.is_speaking()
-                and self._state != ListenerState.RECORDING
-            ):
-                rms = VoiceRecorder.calculate_rms(indata)
-                # If speech energy threshold exceeded or wake word detected while speaking
-                if rms >= self.barge_in_threshold_rms or self.detector.process_frame(indata):
-                    logger.info("🛑 Barge-in! Stopping all playback and listening...")
-                    self.tts.stop()
-                    if self.on_barge_in:
-                        try:
-                            self.on_barge_in()
-                        except Exception as err:
-                            logger.error("Error in on_barge_in callback: %s", err)
-                    self.recorder.start()
-                    self.recorder.add_frame(indata)  # capture the triggering frame
-                    self._set_state(ListenerState.RECORDING)
-                    return
-
-            # 2. State machine handling
-            if self._state == ListenerState.LISTENING_WAKE:
-                trigger = self.detector.process_frame(indata)
-                if trigger:
-                    self._last_wake_info = trigger
-                    self._set_state(ListenerState.WAKE_DETECTED)
-                    if self.on_wake:
-                        try:
-                            self.on_wake(trigger)
-                        except Exception as err:
-                            logger.error("Error in on_wake callback: %s", err)
-
-                    # Transition immediately to recording utterance
-                    self.recorder.start()
-                    self._set_state(ListenerState.RECORDING)
-
-            elif self._state == ListenerState.RECORDING:
-                # If user hasn't started speaking query yet, check if wake word is being repeated
-                if not self.recorder._speech_started:
-                    trigger = self.detector.process_frame(indata)
-                    if trigger:
-                        self._last_wake_info = trigger
-                        if self.on_wake:
-                            try:
-                                self.on_wake(trigger)
-                            except Exception as err:
-                                logger.error("Error in on_wake callback: %s", err)
-                        self.recorder.start()
-                        return
-
-                continue_recording = self.recorder.add_frame(indata)
-                if not continue_recording:
-                    audio_data = self.recorder.get_audio()
-                    wake_info = self._last_wake_info.copy()
-
-                    if self.on_utterance:
-                        try:
-                            self.on_utterance(audio_data, wake_info)
-                        except Exception as err:
-                            logger.error("Error in on_utterance callback: %s", err)
-
-                    # Queue BEFORE state change so the worker never sees PROCESSING
-                    # with an empty queue (which causes it to race into follow-up RECORDING
-                    # and then silently discard the barge-in audio's keep_listening result).
-                    self._processing_queue.put((audio_data, wake_info))
-                    self._set_state(ListenerState.PROCESSING)
-
     def start(self) -> None:
-        """Start continuous wake word listening loop and worker thread."""
         if self._running:
             return
-
+        if any(thread.is_alive() for thread in self._threads):
+            raise RuntimeError("Previous listener workers are still stopping")
+        self._frame_queue = queue.Queue(maxsize=8)
+        self._processing_queue = queue.Queue(maxsize=4)
+        self._notifications = queue.Queue(maxsize=32)
+        self._recent_audio.clear()
+        self.dropped_frames = 0
+        self._stop_event = threading.Event()
+        start_detector = getattr(self.detector, "start", None)
+        if start_detector:
+            start_detector()
         self._running = True
         self._set_state(ListenerState.LISTENING_WAKE)
-
-        # Start worker thread for background processing
-        self._worker_thread = threading.Thread(target=self._process_worker, daemon=True)
-        self._worker_thread.start()
-
-        # Blocksize = 1280 frames (80ms at 16kHz), optimal for low-latency detection
-        self.backend.start_stream(
-            callback=self._audio_callback,
-            sample_rate=self.sample_rate,
-            channels=1,
-            device=self.device,
-            blocksize=1280,
-        )
-        logger.info("WakeListenerLoop is active. Awaiting wake word...")
+        self._threads = [
+            threading.Thread(target=target, daemon=True)
+            for target in (
+                self._frame_worker,
+                self._process_worker,
+                self._notification_worker,
+            )
+        ]
+        for thread in self._threads:
+            thread.start()
+        try:
+            self.backend.start_stream(
+                callback=self._audio_callback,
+                sample_rate=self.sample_rate,
+                channels=1,
+                device=self.device,
+                blocksize=1280,
+            )
+        except BaseException:
+            self.stop()
+            raise
+        logger.info("Wake listener active; audio and inference run on separate workers.")
 
     def stop(self) -> None:
-        """Stop listening loop and terminate worker thread."""
         self._running = False
-        self.backend.stop_stream()
-        self._processing_queue.put(None)
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=1.0)
-        self._set_state(ListenerState.IDLE)
-        logger.info("WakeListenerLoop stopped.")
+        self._stop_event.set()
+        try:
+            self.backend.stop_stream()
+        finally:
+            if self.tts:
+                self.tts.stop()
+            stop_detector = getattr(self.detector, "stop", None)
+            if stop_detector:
+                stop_detector()
+            for thread in self._threads:
+                if thread is not threading.current_thread():
+                    thread.join(timeout=1.0)
+            with self._lock:
+                self._state = ListenerState.IDLE
+            logger.info("Wake listener stopped (%d dropped audio frames).", self.dropped_frames)

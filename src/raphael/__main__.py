@@ -4,27 +4,13 @@ import argparse
 import re
 import sys
 import time
-from datetime import datetime
+from pathlib import Path
 
-from raphael.audio import (
-    SpeechToText,
-    TextToSpeech,
-    WakeListenerLoop,
-    WakeWordDetector,
-    record_voice_samples,
-    train_custom_wakeword,
-)
-from raphael.config import get_settings
-from raphael.logging import setup_logging
-from raphael.memory import (
-    ConversationManager,
-    ConversationTurn,
-    MemoryItem,
-    MemoryStore,
-    MemoryType,
-)
-from raphael.platform import generate_system_prompt, get_audio_backend
-from raphael.providers import ChatMessage, get_model_router
+from raphael.conversation import is_farewell, strip_wake_phrase
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RAW_VOICE_DIR = PROJECT_ROOT / "training" / "raw"
+PREPARED_DATASET_DIR = PROJECT_ROOT / "training" / "dataset"
 
 
 def main() -> int:
@@ -34,8 +20,16 @@ def main() -> int:
         "command",
         nargs="?",
         default="run",
-        choices=["run", "listen", "setup", "record-samples", "train-wake"],
-        help="Command to run: 'run' (default), 'listen', 'setup', 'record-samples', 'train-wake'",
+        choices=[
+            "run",
+            "listen",
+            "setup",
+            "record-samples",
+            "train-wake",
+            "prepare-voice",
+            "train-voice",
+        ],
+        help="Command to run",
     )
     parser.add_argument(
         "--listen",
@@ -54,6 +48,24 @@ def main() -> int:
         default="Hey Raphael",
         help="Target wake phrase to train (default: 'Hey Raphael')",
     )
+    parser.add_argument(
+        "--input",
+        type=str,
+        default=str(RAW_VOICE_DIR),
+        help="Raw licensed video/audio (default: training/raw)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=str(PREPARED_DATASET_DIR),
+        help="Prepared Piper dataset directory (default: training/dataset)",
+    )
+    parser.add_argument(
+        "--voice-name",
+        type=str,
+        default="custom_voice",
+        help="Installed Piper voice name (models/tts/<name>.onnx)",
+    )
     args = parser.parse_args()
 
     # If user ran `python -m raphael setup`
@@ -65,17 +77,69 @@ def main() -> int:
 
     # If user ran `python -m raphael record-samples`
     if args.command == "record-samples":
+        from raphael.audio.trainer import record_voice_samples
+
         record_voice_samples(count=args.count, phrase=args.phrase)
         return 0
 
     # If user ran `python -m raphael train-wake`
     if args.command == "train-wake":
+        from raphael.audio.trainer import train_custom_wakeword
+
         try:
             train_custom_wakeword()
         except Exception as err:
             print(f"\n❌ Training failed: {err}")
             return 1
         return 0
+
+    if args.command == "prepare-voice":
+        from raphael.audio.voice_dataset import prepare_voice_dataset
+
+        raw_dir = Path(args.input)
+        if not raw_dir.exists():
+            print(f"Drop licensed video/audio in {raw_dir} then re-run prepare-voice.")
+            return 2
+        try:
+            report = prepare_voice_dataset(
+                input_path=raw_dir,
+                output_dir=args.output,
+            )
+        except (OSError, RuntimeError, ValueError) as err:
+            print(f"Voice dataset preparation failed: {err}")
+            return 1
+        print(
+            f"Prepared {report.clip_count} clips from {report.source_count} sources "
+            f"({report.skipped_count} skipped) at {report.output_dir}"
+        )
+        print(
+            "Train with: python -m raphael train-voice --output "
+            f"{report.output_dir} --voice-name {args.voice_name}"
+        )
+        return 0
+
+    if args.command == "train-voice":
+        from raphael.audio.piper_train import PiperTrainError, build_piper_train_plan
+
+        try:
+            plan = build_piper_train_plan(
+                dataset_dir=Path(args.output),
+                voice_name=args.voice_name,
+            )
+        except PiperTrainError as err:
+            print(f"Voice training setup failed: {err}")
+            return 1
+        print("Piper training uses a separate GPU venv. RAPHAEL runtime only loads the ONNX.")
+        for step in plan.steps:
+            print(f"  • {step}")
+        print(f"Then set TTS_ENGINE=piper and TTS_VOICE={plan.voice_name}")
+        return 0
+
+    from raphael.config import get_settings
+    from raphael.logging import setup_logging
+    from raphael.memory import ConversationManager, MemoryItem, MemoryStore, MemoryType
+    from raphael.platform import generate_system_prompt, get_audio_backend
+    from raphael.providers import get_model_router
 
     settings = get_settings()
     logger = setup_logging(settings.app.log_level)
@@ -118,6 +182,14 @@ def main() -> int:
     )
 
     if args.listen or args.command == "listen":
+        from raphael.audio import (
+            SpeechToText,
+            TextToSpeech,
+            VoiceRecorder,
+            WakeListenerLoop,
+            WakeWordDetector,
+        )
+
         logger.info("Initializing wake-word, TTS, and STT engines (STT loads in background)...")
         detector = WakeWordDetector(
             wake_phrase=settings.audio.wake_word,
@@ -159,10 +231,6 @@ def main() -> int:
                     recalled_memories.append(p.content)
             return generate_system_prompt(settings=settings, memories=recalled_memories)
 
-        _farewell_re = re.compile(
-            r"\b(bye|goodbye|good\s*night|goodnight|see\s+you\s+(later|soon|around|tomorrow)|take\s+care|farewell)\b",
-            re.IGNORECASE,
-        )
         _wait_re = re.compile(
             r"^(wait|hold\s+on|hang\s+on|one\s+sec(ond)?|pause)[.?!]*$",
             re.IGNORECASE,
@@ -184,7 +252,11 @@ def main() -> int:
         def on_wake(info: dict):
             logger.info("🎯 Wake detected! Details: %s", info)
             _in_followup[0] = False
-            tts.speak("Hey, I'm here!", block=False)
+
+        def speak_reply(text: str, block: bool = True) -> bool:
+            if not loop.is_running:
+                return False
+            return tts.speak(text, block=block)
 
         def on_transcription(text: str, wake_info: dict, audio_data) -> bool:
             user_text = text.strip()
@@ -196,32 +268,27 @@ def main() -> int:
             logger.info('🗣️ You: "%s"', user_text)
 
             # Clean wake phrase from user query
-            cleaned_query = re.sub(
-                r"^(hey\s+)?(raphael|rafael|raphel|rafeal)[,\s]*",
-                "",
-                user_text,
-                flags=re.IGNORECASE,
-            ).strip()
+            cleaned_query = strip_wake_phrase(user_text, settings.audio.wake_word)
 
             if not cleaned_query:
                 # User just said the wake word with no follow-up
                 reply = "Hey! What's on your mind?"
                 logger.info('🤖 RAPHAEL: "%s"', reply)
-                tts.speak(reply, block=True)
+                speak_reply(reply, block=True)
                 _in_followup[0] = True
                 return True
 
             # Check if user requested pause / wait
             if _wait_re.search(cleaned_query):
                 logger.info("⏸️ Pause requested ('%s') — saying 'Hmm?'", cleaned_query)
-                tts.speak("Hmm?", block=True)
+                speak_reply("Hmm?", block=True)
                 _in_followup[0] = True
                 return True
 
             # Check if user requested immediate stop / cancel
             if _stop_re.search(cleaned_query):
                 logger.info("🛑 Stop requested ('%s') — returning to standby.", cleaned_query)
-                tts.speak("Got it, quiet now.", block=True)
+                speak_reply("Got it, quiet now.", block=True)
                 _in_followup[0] = False
                 return False
 
@@ -239,7 +306,7 @@ def main() -> int:
                 logger.info("💾 Explicit memory stored: '%s'", fact_to_remember)
                 ack = f"Got it, I'll remember that {fact_to_remember}."
                 logger.info('🤖 RAPHAEL: "%s"', ack)
-                tts.speak(ack, block=True)
+                speak_reply(ack, block=True)
                 _in_followup[0] = True
                 return True
 
@@ -248,30 +315,26 @@ def main() -> int:
             if forget_match:
                 topic_to_forget = forget_match.group(1).strip()
                 deleted_count = memory_store.delete_by_pattern(topic_to_forget)
-                logger.info("🗑️ Explicit memory deleted (%d matching '%s')", deleted_count, topic_to_forget)
-                ack = f"Done, I've cleared that from my memory."
+                logger.info(
+                    "🗑️ Explicit memory deleted (%d matching '%s')", deleted_count, topic_to_forget
+                )
+                ack = "Done, I've cleared that from my memory."
                 logger.info('🤖 RAPHAEL: "%s"', ack)
-                tts.speak(ack, block=True)
+                speak_reply(ack, block=True)
                 _in_followup[0] = True
                 return True
 
             # Check for farewell in the user's query before calling the AI
-            if _farewell_re.search(cleaned_query):
+            if is_farewell(cleaned_query):
                 logger.info("👋 Farewell detected in user query — ending session.")
-                farewell_reply = "Goodnight! Talk to you soon, take care!"
+                farewell_reply = "Talk to you soon, take care!"
                 logger.info('🤖 RAPHAEL: "%s"', farewell_reply)
-                tts.speak(farewell_reply, block=True)
+                speak_reply(farewell_reply, block=True)
                 _in_followup[0] = False
                 return False
 
             # Record user turn in persistent SQLite session
             conv_manager.add_turn(role="user", content=cleaned_query)
-
-            # Trigger background rolling summarization of older turns if needed
-            try:
-                conv_manager.summarize_older_turns(router_or_provider=router)
-            except Exception as sum_err:
-                logger.debug("Background summarization skipped: %s", sum_err)
 
             # Build sliding context window messages with system persona & recalled memories
             system_prompt = build_system_prompt(cleaned_query)
@@ -296,14 +359,11 @@ def main() -> int:
                     latency=response.latency,
                 )
 
-                # Speak response out loud
-                tts.speak(reply_text, block=True)
-
-                # Check if the AI's reply signals session end
-                if _farewell_re.search(reply_text):
-                    logger.info("👋 Farewell detected in AI reply — ending session.")
-                    _in_followup[0] = False
+                if not loop.is_running:
                     return False
+                # Summaries run separately so the next reply never waits for an extra LLM call.
+                conv_manager.schedule_summary(router_or_provider=router)
+                speak_reply(reply_text, block=True)
 
                 # Stay in follow-up conversation mode
                 _in_followup[0] = True
@@ -312,7 +372,7 @@ def main() -> int:
             except Exception as err:
                 logger.error("Error generating or speaking AI response: %s", err)
                 error_msg = "Apologies, sir. I encountered an error processing that request."
-                tts.speak(error_msg, block=True)
+                speak_reply(error_msg, block=True)
                 return True  # Stay in conversation despite transient error
 
         def on_barge_in():
@@ -327,6 +387,11 @@ def main() -> int:
             on_wake=on_wake,
             on_transcription=on_transcription,
             on_barge_in=on_barge_in,
+            recorder=VoiceRecorder(
+                sample_rate=settings.audio.sample_rate,
+                silence_duration_seconds=settings.audio.utterance_silence_seconds,
+            ),
+            stt_beam_size=settings.audio.stt_beam_size,
             sample_rate=settings.audio.sample_rate,
             device=settings.audio.input_device,
             barge_in=True,

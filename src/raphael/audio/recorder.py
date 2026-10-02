@@ -1,7 +1,5 @@
 """Voice utterance recorder with silence / VAD energy cutoff."""
 
-import time
-
 import numpy as np
 
 from raphael.logging import get_logger
@@ -16,7 +14,7 @@ class VoiceRecorder:
         self,
         sample_rate: int = 16000,
         silence_threshold_rms: float = 0.008,
-        silence_duration_seconds: float = 1.8,
+        silence_duration_seconds: float = 1.0,
         min_speech_duration_seconds: float = 0.25,
         max_duration_seconds: float = 30.0,
         initial_silence_timeout: float = 3.5,
@@ -40,7 +38,8 @@ class VoiceRecorder:
         self._buffer.clear()
         self._is_recording = True
         self._speech_started = False
-        self._start_time = time.time()
+        self._start_time = 0.0
+        self._sample_count = 0
         self._speech_start_time = self._start_time
         self._last_speech_time = self._start_time
         logger.info("🎙️ Utterance recording started. Listening for speech...")
@@ -57,7 +56,8 @@ class VoiceRecorder:
         # Flatten frame
         frame = audio_frame.squeeze()
         self._buffer.append(frame.copy())
-        now = time.time()
+        self._sample_count += frame.size
+        now = self._sample_count / self.sample_rate
 
         # Calculate frame RMS
         rms = self.calculate_rms(frame)

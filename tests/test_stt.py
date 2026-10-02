@@ -1,8 +1,21 @@
 """Tests for faster-whisper speech-to-text module."""
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import numpy as np
+import pytest
 
 from raphael.audio.stt import SpeechToText
+
+
+@pytest.fixture(autouse=True)
+def model_without_downloads(monkeypatch):
+    model = MagicMock()
+    model.transcribe.return_value = ([], SimpleNamespace(language="en", duration=1.0))
+    monkeypatch.setattr(SpeechToText, "_load_model", lambda *_args: model)
+    monkeypatch.setattr("raphael.audio.stt._preload_cuda_libraries", lambda: None)
+    return model
 
 
 def test_stt_initialization():

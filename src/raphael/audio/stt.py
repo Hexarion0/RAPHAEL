@@ -15,10 +15,13 @@ logger = get_logger("audio.stt")
 
 # Common Whisper hallucination patterns on silence or ambient noise
 _HALLUCINATION_PATTERNS = [
-    re.compile(r"^\s*(thank\s+you(\s+very\s+much|\s+for\s+watching)?|thanks\s+for\s+watching)[.?!]*\s*$", re.IGNORECASE),
+    re.compile(
+        r"^\s*(thank\s+you(\s+very\s+much|\s+for\s+watching)?|thanks\s+for\s+watching)[.?!]*\s*$",
+        re.IGNORECASE,
+    ),
     re.compile(r"^\s*(subtitles?\s+by|subscribe|like\s+and\s+subscribe)[.?!]*\s*$", re.IGNORECASE),
     re.compile(r"^\s*(\[[^\]]+\]|\([^\)]+\))\s*$"),  # [Music], (bell rings), etc.
-    re.compile(r"^\s*(\.|\?|!|,|-|_)+\s*$"),         # lone punctuation
+    re.compile(r"^\s*(\.|\?|!|,|-|_)+\s*$"),  # lone punctuation
     re.compile(r"^\s*(you|bye|okay|oh)\.?\s*$", re.IGNORECASE),  # single phantom syllables on noise
 ]
 
@@ -29,7 +32,13 @@ def _preload_cuda_libraries() -> None:
         import ctypes
         import sys
 
-        site_pkgs = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "nvidia"
+        site_pkgs = (
+            Path(sys.prefix)
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+            / "nvidia"
+        )
         if site_pkgs.is_dir():
             for so_file in sorted(site_pkgs.glob("*/lib/*.so*")):
                 if so_file.is_file() and not so_file.name.endswith(".a"):
@@ -52,7 +61,8 @@ class SpeechToText:
         language: str = "en",
         initial_prompt: str = (
             "Hey Raphael. Conversational voice commands and questions. "
-            "Words like: open, close, search, play, pause, stop, set, remind, timer, weather, time, "
+            "Words like: open, close, search, play, pause, stop, set, remind, timer, "
+            "weather, time, "
             "what, how, why, when, where, who, tell me, can you, could you, please, thanks."
         ),
     ) -> None:
@@ -97,12 +107,17 @@ class SpeechToText:
         if device == "auto":
             try:
                 import ctranslate2
+
                 if ctranslate2.get_cuda_device_count() > 0:
                     resolved_device = "cuda"
-                    resolved_compute = "float16" if compute_type in ("default", "auto") else compute_type
+                    resolved_compute = (
+                        "float16" if compute_type in ("default", "auto") else compute_type
+                    )
                 else:
                     resolved_device = "cpu"
-                    resolved_compute = "int8" if compute_type in ("default", "auto") else compute_type
+                    resolved_compute = (
+                        "int8" if compute_type in ("default", "auto") else compute_type
+                    )
             except Exception:
                 resolved_device = "cpu"
                 resolved_compute = "int8"
@@ -161,7 +176,7 @@ class SpeechToText:
         self,
         audio: np.ndarray | str | Path,
         language: str | None = None,
-        beam_size: int = 8,
+        beam_size: int = 3,
     ) -> str:
         """Transcribe an audio numpy array or file path to plain text."""
         result = self.transcribe_detailed(
@@ -175,9 +190,17 @@ class SpeechToText:
         self,
         audio: np.ndarray | str | Path,
         language: str | None = None,
-        beam_size: int = 8,
+        beam_size: int = 3,
     ) -> dict[str, Any]:
         """Transcribe audio with Silero VAD filtering and anti-hallucination safeguards."""
+        if isinstance(audio, np.ndarray) and audio.size == 0:
+            return {
+                "text": "",
+                "language": language or self.language,
+                "segments": [],
+                "duration": 0.0,
+                "latency": 0.0,
+            }
         # Wait for background model load if it hasn't finished yet
         if not self._ready.is_set():
             logger.info("⏳ STT model still loading — waiting...")
@@ -205,20 +228,20 @@ class SpeechToText:
         decode_kwargs: dict[str, Any] = {
             "language": target_lang,
             "beam_size": beam_size,
-            "temperature": 0,                        # Greedy decoding — no random word sampling
-            "best_of": 1,                            # With temperature=0, only one candidate needed
+            "temperature": 0,  # Greedy decoding — no random word sampling
+            "best_of": 1,  # With temperature=0, only one candidate needed
             "initial_prompt": self.initial_prompt,
-            "condition_on_previous_text": False,     # Prevents hallucinations cascading across segments
-            "vad_filter": True,                      # Silero VAD strips silence before inference
+            "condition_on_previous_text": False,  # Avoid cascading hallucinations
+            "vad_filter": True,  # Silero VAD strips silence before inference
             "vad_parameters": dict(
                 min_silence_duration_ms=200,
-                speech_pad_ms=400,                   # Extra padding so word edges aren't clipped
+                speech_pad_ms=400,  # Extra padding so word edges aren't clipped
             ),
             "repetition_penalty": 1.3,
             "no_repeat_ngram_size": 3,
-            "compression_ratio_threshold": 2.2,      # Tighter: discard garbled/repetition-heavy output
-            "log_prob_threshold": -0.7,              # Tighter: drop low-confidence segments
-            "no_speech_threshold": 0.55,             # Slightly tighter silence filter
+            "compression_ratio_threshold": 2.2,  # Tighter: discard garbled/repetition-heavy output
+            "log_prob_threshold": -0.7,  # Tighter: drop low-confidence segments
+            "no_speech_threshold": 0.55,  # Slightly tighter silence filter
         }
 
         try:
@@ -229,7 +252,9 @@ class SpeechToText:
                 cleaned_text = segment.text.strip()
                 if not cleaned_text:
                     continue
-                if self._is_hallucination(cleaned_text, segment.no_speech_prob, segment.avg_logprob):
+                if self._is_hallucination(
+                    cleaned_text, segment.no_speech_prob, segment.avg_logprob
+                ):
                     logger.debug(
                         "Filtered out hallucination: '%s' (no_speech_prob=%.2f, logprob=%.2f)",
                         cleaned_text,
@@ -267,7 +292,9 @@ class SpeechToText:
                 cleaned_text = segment.text.strip()
                 if not cleaned_text:
                     continue
-                if self._is_hallucination(cleaned_text, segment.no_speech_prob, segment.avg_logprob):
+                if self._is_hallucination(
+                    cleaned_text, segment.no_speech_prob, segment.avg_logprob
+                ):
                     continue
                 text_parts.append(cleaned_text)
                 segments_list.append(
@@ -297,4 +324,3 @@ class SpeechToText:
             "duration": getattr(info, "duration", 0.0),
             "latency": elapsed,
         }
-

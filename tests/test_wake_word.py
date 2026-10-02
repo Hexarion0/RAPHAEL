@@ -1,6 +1,11 @@
 """Tests for wake word detection, voice recording, and listener loop."""
 
+import time
+from threading import Event
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 
 from raphael.audio.listener import ListenerState, WakeListenerLoop
 from raphael.audio.recorder import VoiceRecorder
@@ -67,9 +72,19 @@ class MockAudioBackend(AudioBackend):
         return self._streaming
 
 
-def test_wake_detector_initialization():
+def test_wake_detector_initialization(monkeypatch):
     """Verify openWakeWord detector initializes and exposes models."""
-    detector = WakeWordDetector(models=["hey_jarvis", "alexa"], threshold=0.6, cooldown_seconds=1.5)
+    monkeypatch.setattr(
+        WakeWordDetector, "_resolve_model_paths", staticmethod(lambda _models: ["model.onnx"])
+    )
+    monkeypatch.setattr(
+        WakeWordDetector,
+        "_load_wake_model",
+        staticmethod(lambda _paths: SimpleNamespace(models={"hey_jarvis": object()})),
+    )
+    detector = WakeWordDetector(
+        models=["hey_jarvis"], threshold=0.6, cooldown_seconds=1.5, enable_whisper_spotter=False
+    )
     assert detector.threshold == 0.6
     assert detector.cooldown_seconds == 1.5
     assert not detector.is_in_cooldown()
@@ -78,7 +93,7 @@ def test_wake_detector_initialization():
 
 def test_wake_detector_silent_frame():
     """Verify detector handles silent frames cleanly without false positive triggers."""
-    detector = WakeWordDetector(threshold=0.5)
+    detector = WakeWordDetector(threshold=0.5, enable_whisper_spotter=False)
     silent_frame = np.zeros(1280, dtype=np.float32)
     result = detector.process_frame(silent_frame)
     assert result is None
@@ -125,6 +140,7 @@ def test_wake_listener_loop_state_transitions():
 
     loop = WakeListenerLoop(
         audio_backend=backend,
+        detector=WakeWordDetector(enable_whisper_spotter=False),
         on_state_change=on_state,
     )
     assert loop.state == ListenerState.IDLE
@@ -157,6 +173,7 @@ def test_wake_listener_barge_in_interruption():
     mock_tts = MockTTS()
     loop = WakeListenerLoop(
         audio_backend=backend,
+        detector=WakeWordDetector(enable_whisper_spotter=False),
         tts=mock_tts,
         barge_in=True,
         barge_in_threshold_rms=0.01,
@@ -171,7 +188,178 @@ def test_wake_listener_barge_in_interruption():
     backend.callback(speech_frame, 1280, None, None)
 
     # Verify TTS was stopped and loop switched to recording
+    wait_for(lambda: mock_tts.stopped)
     assert mock_tts.stopped is True
     assert loop.state == ListenerState.RECORDING
 
     loop.stop()
+
+
+def wait_for(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            pytest.fail("Timed out waiting for audio worker")
+        time.sleep(0.005)
+
+
+def test_keyword_inference_does_not_block_frames_and_reset_discards_results(monkeypatch):
+    entered, release = Event(), Event()
+
+    class SlowSpotter:
+        def transcribe(self, _audio, **_kwargs):
+            entered.set()
+            assert release.wait(2)
+            return [SimpleNamespace(text="Hey Raphael")], None
+
+    monkeypatch.setattr(WakeWordDetector, "_load_spotter_model", lambda _self: SlowSpotter())
+    detector = WakeWordDetector()
+    try:
+        wait_for(lambda: detector._spotter_model is not None)
+        frame = np.ones(1280, dtype=np.float32) * 0.1
+        for _ in range(7):
+            detector.process_frame(frame)
+        assert entered.wait(1)
+        assert detector.process_frame(frame) is None
+        detector.reset()
+        release.set()
+        wait_for(lambda: detector._spotter_requests.unfinished_tasks == 0)
+        assert detector.process_frame(frame) is None
+    finally:
+        release.set()
+        detector.stop()
+
+
+def test_keyword_result_triggers_wake_on_next_frame(monkeypatch):
+    class Spotter:
+        def transcribe(self, _audio, **_kwargs):
+            return [SimpleNamespace(text="Hey Raphael")], None
+
+    monkeypatch.setattr(WakeWordDetector, "_load_spotter_model", lambda _self: Spotter())
+    detector = WakeWordDetector()
+    try:
+        wait_for(lambda: detector._spotter_model is not None)
+        frame = np.ones(1280, dtype=np.float32) * 0.1
+        for _ in range(7):
+            detector.process_frame(frame)
+        wait_for(lambda: detector._spotter_result is not None)
+        assert detector.process_frame(frame)["model"] == "whisper_keyword"
+        assert detector.process_frame(frame) is None
+    finally:
+        detector.stop()
+
+
+def test_callback_keeps_latest_audio_when_detection_is_slow():
+    entered, release = Event(), Event()
+
+    class SlowDetector:
+        def process_frame(self, _frame):
+            entered.set()
+            assert release.wait(2)
+
+        def reset(self, **_kwargs):
+            pass
+
+    backend = MockAudioBackend()
+    loop = WakeListenerLoop(backend, detector=SlowDetector())
+    loop.start()
+    try:
+        frame = np.zeros(1280, dtype=np.float32)
+        backend.callback(frame, 1280, None, None)
+        assert entered.wait(1)
+        for _ in range(100):
+            backend.callback(frame, 1280, None, None)
+        assert loop._frame_queue.qsize() == 8
+        assert loop.dropped_frames >= 92
+        frame[:] = 1
+        assert not np.any(loop._frame_queue.queue[-1])  # Callback owns a copy.
+    finally:
+        release.set()
+        loop.stop()
+
+
+def test_slow_wake_notification_does_not_delay_recording():
+    entered, release = Event(), Event()
+
+    class Trigger:
+        def process_frame(self, _frame):
+            return {"model": "mock"}
+
+        def reset(self, **_kwargs):
+            pass
+
+    def on_wake(_info):
+        entered.set()
+        assert release.wait(2)
+
+    backend = MockAudioBackend()
+    loop = WakeListenerLoop(backend, detector=Trigger(), on_wake=on_wake)
+    loop.start()
+    try:
+        frame = np.ones(1280, dtype=np.float32) * 0.1
+        backend.callback(frame, 1280, None, None)
+        assert entered.wait(1)
+        backend.callback(frame, 1280, None, None)
+        wait_for(lambda: len(loop.recorder._buffer) == 2)
+        assert loop.state == ListenerState.RECORDING
+    finally:
+        release.set()
+        loop.stop()
+
+
+def test_listener_restart_and_failed_stream_start_are_clean():
+    backend = MockAudioBackend()
+    loop = WakeListenerLoop(backend, detector=WakeWordDetector(enable_whisper_spotter=False))
+    for _ in range(2):
+        loop.start()
+        assert loop.is_running
+        loop.stop()
+        assert not loop.is_running
+        assert all(not thread.is_alive() for thread in loop._threads)
+
+    def fail(**_kwargs):
+        raise RuntimeError("No microphone")
+
+    backend.start_stream = fail
+    with pytest.raises(RuntimeError, match="No microphone"):
+        loop.start()
+    assert loop.state == ListenerState.IDLE
+    assert all(not thread.is_alive() for thread in loop._threads)
+
+
+def test_old_response_cannot_cancel_barge_in():
+    started, finish = Event(), Event()
+    backend = MockAudioBackend()
+    detector = WakeWordDetector(enable_whisper_spotter=False)
+
+    def response(*_args):
+        started.set()
+        assert finish.wait(2)
+        return False
+
+    loop = WakeListenerLoop(backend, detector=detector, on_transcription=response)
+    loop.start()
+    try:
+        with loop._lock:
+            loop._start_recording()
+            loop._state = ListenerState.PROCESSING
+            loop._processing_queue.put((np.ones(1280), {}, loop._recording_generation))
+        assert started.wait(1)
+        with loop._lock:
+            loop._start_recording()  # New recording started while old callback is running.
+        finish.set()
+        wait_for(lambda: loop._processing_queue.unfinished_tasks == 0)
+        assert loop.state == ListenerState.RECORDING
+    finally:
+        finish.set()
+        loop.stop()
+
+
+def test_recorder_uses_audio_duration_instead_of_processing_speed():
+    recorder = VoiceRecorder(silence_duration_seconds=0.2, min_speech_duration_seconds=0.1)
+    recorder.start()
+    for _ in range(4):
+        assert recorder.add_frame(np.ones(1280, dtype=np.float32) * 0.1)
+    assert recorder.add_frame(np.zeros(1280, dtype=np.float32))
+    assert recorder.add_frame(np.zeros(1280, dtype=np.float32))
+    assert not recorder.add_frame(np.zeros(1280, dtype=np.float32))
