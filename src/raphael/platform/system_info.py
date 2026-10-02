@@ -7,7 +7,6 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from raphael.config import Settings, get_settings
 from raphael.logging import get_logger

@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
 
 from raphael.logging import get_logger
 
@@ -12,10 +11,10 @@ logger = get_logger("persona")
 class PersonaVibe(str, Enum):
     """Mood and stylistic profile for RAPHAEL's persona."""
 
-    COMPANION_WARM = "companion_warm"      # Default: charming, caring, witty, teasing
-    SHARP_CODER = "sharp_coder"            # Focused, technical, concise
-    LATE_NIGHT = "late_night"              # Chill, cozy, playful about late hours
-    HIGH_ENERGY = "high_energy"            # Upbeat, enthusiastic
+    COMPANION_WARM = "companion_warm"  # Default: charming, caring, witty, teasing
+    SHARP_CODER = "sharp_coder"  # Focused, technical, concise
+    LATE_NIGHT = "late_night"  # Chill, cozy, playful about late hours
+    HIGH_ENERGY = "high_energy"  # Upbeat, enthusiastic
 
 
 def determine_time_vibe(now: datetime | None = None) -> tuple[str, str]:
@@ -25,22 +24,26 @@ def determine_time_vibe(now: datetime | None = None) -> tuple[str, str]:
 
     if 0 <= hour < 5:
         return (
-            "LATE NIGHT VIBE: It's late night / early morning. Speak with a chill, slightly teasing tone about staying up late or late-night coding/gaming.",
+            "LATE NIGHT VIBE: It's late night / early morning. Speak with a chill, "
+            "slightly teasing tone about staying up late or late-night coding/gaming.",
             "late night",
         )
     elif 5 <= hour < 12:
         return (
-            "MORNING VIBE: It's morning. Be fresh, crisp, motivating, and ready for the day's projects.",
+            "MORNING VIBE: It's morning. Be fresh, crisp, motivating, and ready for the "
+            "day's projects.",
             "morning",
         )
     elif 12 <= hour < 18:
         return (
-            "AFTERNOON VIBE: Active workday/afternoon. Keep the energy smooth, witty, and productive.",
+            "AFTERNOON VIBE: Active workday/afternoon. Keep the energy smooth, witty, "
+            "and productive.",
             "afternoon",
         )
     else:
         return (
-            "EVENING VIBE: Relaxed evening. Warm, conversational, unwinding or gearing up for gaming.",
+            "EVENING VIBE: Relaxed evening. Warm, conversational, unwinding or gearing "
+            "up for gaming.",
             "evening",
         )
 
@@ -77,14 +80,20 @@ def build_advanced_persona(
         f"Current System State:\n"
         f"• Local Time: {time_str}\n"
         f"• OS & Desktop: {os_distro} ({desktop_env}) | User: {user_name}\n"
-        f"• Hardware: {gpu_telemetry} | {cpu_cores} CPU cores | {ram_used_gb}/{ram_total_gb}GB RAM\n"
+        f"• Hardware: {gpu_telemetry} | {cpu_cores} CPU cores | "
+        f"{ram_used_gb}/{ram_total_gb}GB RAM\n"
         f"• Audio Pipeline: faster-whisper STT (CUDA float16) → Model Router → edge_tts\n"
         f"• Persistent Store: SQLite (data/raphael.db)\n"
         f"{memory_block}"
         f"\n"
         f"Directive & Voice Rules:\n"
-        f"1. DIRECT & CONCISE: Get straight to the point. No small talk, no conversational filler, and no fluff metaphors.\n"
-        f"2. PUNCHY ANSWERS: Answer questions clearly and accurately in 1 to 2 crisp, articulate sentences (longer only when explicitly asked for code or deep technical breakdowns).\n"
-        f"3. ZERO MONOLOGUE: Start immediately with your direct spoken answer. Never output thinking tags, self-checks, or internal analysis.\n"
-        f"4. CLEAN AUDIO: Output pure spoken text only. No markdown asterisks, bold text, bullet points, or emojis."
+        f"1. DIRECT & CONCISE: Get straight to the point. No small talk, no "
+        f"conversational filler, and no fluff metaphors.\n"
+        f"2. PUNCHY ANSWERS: Answer questions clearly and accurately in 1 to 2 crisp, "
+        f"articulate sentences (longer only when explicitly asked for code "
+        f"or deep technical breakdowns).\n"
+        f"3. ZERO MONOLOGUE: Start immediately with your direct spoken answer. Never "
+        f"output thinking tags, self-checks, or internal analysis.\n"
+        f"4. CLEAN AUDIO: Output pure spoken text only. No markdown asterisks, bold "
+        f"text, bullet points, or emojis."
     )
