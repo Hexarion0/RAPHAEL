@@ -34,7 +34,9 @@ class MemoryItem:
         return {
             "id": self.id,
             "content": self.content,
-            "memory_type": self.memory_type.value if isinstance(self.memory_type, MemoryType) else str(self.memory_type),
+            "memory_type": self.memory_type.value
+            if isinstance(self.memory_type, MemoryType)
+            else str(self.memory_type),
             "source": self.source,
             "confidence": self.confidence,
             "created_at": self.created_at.isoformat(),

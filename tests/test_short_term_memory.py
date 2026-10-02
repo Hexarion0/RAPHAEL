@@ -81,7 +81,9 @@ def test_rolling_summarization(temp_store: MemoryStore):
 
     # Add 6 turns (exceeds threshold of 4)
     manager.add_turn(role="user", content="We are planning to build a desktop assistant in Python.")
-    manager.add_turn(role="assistant", content="Awesome, I recommend using faster-whisper and sounddevice.")
+    manager.add_turn(
+        role="assistant", content="Awesome, I recommend using faster-whisper and sounddevice."
+    )
     manager.add_turn(role="user", content="Let's make sure it runs on Arch Linux with Hyprland.")
     manager.add_turn(role="assistant", content="Got it, we will configure Linux audio backend.")
     manager.add_turn(role="user", content="What is our current task?")
@@ -121,3 +123,148 @@ def test_clear_session(temp_store: MemoryStore):
     assert cleared == 2
     assert manager.get_total_turn_count() == 0
     assert len(manager.get_active_messages(system_prompt="Base")) == 1
+
+
+def test_background_summary_does_not_delay_or_duplicate_requests(temp_store):
+    import threading
+
+    manager = ConversationManager(store=temp_store, max_turns=2, auto_summarize_threshold=2)
+    for index in range(4):
+        manager.add_turn("user", f"Topic {index}")
+    entered, release = threading.Event(), threading.Event()
+    router = MagicMock()
+
+    def respond(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(2)
+        return LLMResponse(content="summary", model="test", provider="test")
+
+    router.send.side_effect = respond
+    try:
+        assert manager.schedule_summary(router)
+        assert entered.wait(1)
+        assert not manager.schedule_summary(router)
+    finally:
+        release.set()
+        manager._summary_thread.join(timeout=2)
+    assert not manager.schedule_summary(router)
+    assert router.send.call_count == 1
+
+
+def test_summary_restores_and_clears_only_exact_session(temp_store):
+    from raphael.memory.models import MemoryItem, MemoryType
+
+    for session in ("desk", "desk-other"):
+        temp_store.save_memory(
+            MemoryItem(
+                content="Summary without an identity in its text",
+                memory_type=MemoryType.CONVERSATION,
+                metadata={"session_id": session},
+            )
+        )
+    manager = ConversationManager(store=temp_store, session_id="desk")
+    assert manager.get_summary() == "Summary without an identity in its text"
+    manager.clear_session()
+    temp_store.close()
+    restarted = MemoryStore(temp_store.db_path_str)
+    try:
+        assert ConversationManager(store=restarted, session_id="desk").get_summary() is None
+        assert ConversationManager(store=restarted, session_id="desk-other").get_summary()
+    finally:
+        restarted.close()
+
+
+def test_summary_is_incremental_bounded_and_resumes_after_restart(temp_store):
+    from raphael.memory.manager import SUMMARY_BATCH_TURNS
+    from raphael.memory.models import MemoryType
+
+    manager = ConversationManager(store=temp_store, max_turns=2, auto_summarize_threshold=2)
+    for index in range(70):
+        manager.add_turn("user", f"topic-{index}: " + "x" * 5000)
+    router = MagicMock()
+    router.send.return_value = LLMResponse(content="Earlier context", model="test", provider="test")
+    assert manager.summarize_older_turns(router)
+    first_input = router.send.call_args.args[0][1].content
+    assert "topic-0:" in first_input
+    assert "topic-32:" not in first_input
+    assert len(first_input) < SUMMARY_BATCH_TURNS * 1100
+    restarted = ConversationManager(store=temp_store, max_turns=2, auto_summarize_threshold=2)
+    assert restarted.summarize_older_turns(router)
+    next_input = router.send.call_args.args[0][1].content
+    assert "Earlier context" in next_input
+    assert "topic-32:" in next_input
+    assert "topic-0:" not in next_input
+    assert restarted.summarize_older_turns(router)
+    assert restarted.summarize_older_turns(router) is None
+    assert not restarted.schedule_summary(router)
+    assert router.send.call_count == 3
+    assert temp_store.count_memories(MemoryType.CONVERSATION) == 1
+    restarted.add_turn("user", "new question")
+    assert restarted.summarize_older_turns(router)
+    last_input = router.send.call_args.args[0][1].content
+    assert "topic-68:" in last_input
+    assert "topic-67:" not in last_input
+
+
+def test_clearing_during_summary_does_not_recreate_context(temp_store):
+    import threading
+
+    manager = ConversationManager(store=temp_store, max_turns=2, auto_summarize_threshold=2)
+    for index in range(4):
+        manager.add_turn("user", f"old topic {index}")
+    entered, release = threading.Event(), threading.Event()
+    router = MagicMock()
+
+    def respond(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(2)
+        return LLMResponse(content="Stale summary", model="test", provider="test")
+
+    router.send.side_effect = respond
+    try:
+        assert manager.schedule_summary(router)
+        assert entered.wait(1)
+        assert manager.clear_session() == 4
+    finally:
+        release.set()
+        manager._summary_thread.join(timeout=2)
+    assert manager.get_summary() is None
+    assert ConversationManager(store=temp_store).get_summary() is None
+    for index in range(4):
+        manager.add_turn("user", f"new topic {index}")
+    router.send.return_value = LLMResponse(content="Fresh summary", model="test", provider="test")
+    router.send.side_effect = None
+    assert manager.summarize_older_turns(router) == "Fresh summary"
+
+
+def test_legacy_summary_cursor_prevents_repeated_request(temp_store):
+    from raphael.memory.models import MemoryItem, MemoryType
+
+    manager = ConversationManager(store=temp_store, max_turns=2, auto_summarize_threshold=2)
+    for index in range(6):
+        manager.add_turn("user", f"topic {index}")
+    temp_store.save_memory(
+        MemoryItem(
+            content="Legacy summary",
+            memory_type=MemoryType.CONVERSATION,
+            metadata={"session_id": "default", "older_turns_count": 4},
+        )
+    )
+    router = MagicMock()
+    assert manager.get_summary() == "Legacy summary"
+    assert manager.summarize_older_turns(router) is None
+    router.send.assert_not_called()
+
+
+def test_background_summary_with_in_memory_store():
+    store = MemoryStore(":memory:")
+    try:
+        manager = ConversationManager(store=store, max_turns=2, auto_summarize_threshold=2)
+        for index in range(4):
+            manager.add_turn("user", f"topic {index}")
+        assert manager.schedule_summary()
+        manager._summary_thread.join(timeout=2)
+        assert manager.get_summary()
+        assert manager.get_total_turn_count() == 4
+    finally:
+        store.close()

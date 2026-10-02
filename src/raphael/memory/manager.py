@@ -11,9 +11,13 @@ from raphael.providers.base import ChatMessage
 
 logger = get_logger("memory.manager")
 
+SUMMARY_BATCH_TURNS = 32
+SUMMARY_TURN_CHARS = 1000
+SUMMARY_MAX_CHARS = 2000
+
 
 class ConversationManager:
-    """Manages active conversation sessions with SQLite persistence and rolling context summarization."""
+    """Manage persisted sessions, sliding context, and rolling summaries."""
 
     def __init__(
         self,
@@ -26,13 +30,40 @@ class ConversationManager:
         self.store = store or MemoryStore(db_path=settings.memory.db_path)
         self.session_id = session_id
         self.max_turns = (
-            max_turns
-            if max_turns is not None
-            else settings.memory.max_short_term_turns
+            max_turns if max_turns is not None else settings.memory.max_short_term_turns
         )
         self.auto_summarize_threshold = auto_summarize_threshold
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._summary_lock = threading.Lock()
+        self._generation = 0
         self._cached_summary: str | None = None
+        self._summary_thread: threading.Thread | None = None
+
+    def schedule_summary(self, router_or_provider: Any = None) -> bool:
+        """Schedule occasional summaries without delaying voice replies."""
+        with self._lock:
+            if self._summary_thread and self._summary_thread.is_alive():
+                return False
+            count = self.get_total_turn_count()
+            if count <= self.auto_summarize_threshold:
+                return False
+            summary = self.store.get_session_summary(self.session_id)
+            after_id = summary.metadata.get("last_turn_id", 0) if summary else 0
+            if not self.store.get_summary_batch(self.session_id, after_id, self.max_turns, 1):
+                return False
+
+            def summarize() -> None:
+                try:
+                    self.summarize_older_turns(router_or_provider)
+                except Exception as err:
+                    logger.warning("Background summary failed: %s", err)
+                finally:
+                    if not self.store._is_in_memory:
+                        self.store.close()
+
+            self._summary_thread = threading.Thread(target=summarize, daemon=True)
+            self._summary_thread.start()
+            return True
 
     def add_turn(
         self,
@@ -80,28 +111,18 @@ class ConversationManager:
 
     def get_summary(self) -> str | None:
         """Retrieve the latest running summary for the active session if available."""
-        if self._cached_summary:
+        with self._lock:
+            summary = self.store.get_session_summary(self.session_id)
+            self._cached_summary = summary.content if summary else None
             return self._cached_summary
-
-        summaries = self.store.search_memories(
-            query=self.session_id,
-            memory_type=MemoryType.CONVERSATION,
-            limit=1,
-        )
-        if summaries:
-            self._cached_summary = summaries[0].content
-            return self._cached_summary
-        return None
 
     def get_active_messages(
         self,
         system_prompt: str,
         limit: int | None = None,
     ) -> list[ChatMessage]:
-        """Build the full ChatMessage list for the LLM including system persona, summary, and recent turns."""
-        messages: list[ChatMessage] = [
-            ChatMessage(role="system", content=system_prompt)
-        ]
+        """Build messages with system persona, summary, and recent turns."""
+        messages: list[ChatMessage] = [ChatMessage(role="system", content=system_prompt)]
 
         # Inject conversation summary of older turns if available
         summary = self.get_summary()
@@ -121,76 +142,89 @@ class ConversationManager:
         return messages
 
     def summarize_older_turns(self, router_or_provider: Any = None) -> str | None:
-        """Summarize older turns when turn count exceeds threshold to maintain compact token usage."""
-        total_turns = self.get_total_turn_count()
-        if total_turns <= self.auto_summarize_threshold:
-            return None
+        """Merge a bounded batch of new older turns into the persisted running summary."""
+        with self._summary_lock:
+            return self._summarize_batch(router_or_provider)
 
-        # Retrieve older turns that will be pruned from the active window
-        all_turns = self.store.get_recent_turns(
-            session_id=self.session_id,
-            limit=total_turns,
-        )
-        older_turns = all_turns[: -self.max_turns]
+    def _summarize_batch(self, router_or_provider: Any) -> str | None:
+        """Serialize summarizers while allowing replies and clearing during inference."""
+        with self._lock:
+            if self.get_total_turn_count() <= self.auto_summarize_threshold:
+                return None
+            generation = self._generation
+            previous = self.store.get_session_summary(self.session_id)
+            after_id = previous.metadata.get("last_turn_id", 0) if previous else 0
+            older_turns = self.store.get_summary_batch(
+                self.session_id, after_id, self.max_turns, SUMMARY_BATCH_TURNS
+            )
         if not older_turns:
             return None
 
-        # Format transcript of older turns
-        transcript_lines = [f"{t.role.capitalize()}: {t.content}" for t in older_turns]
-        transcript_text = "\n".join(transcript_lines)
-
+        previous_text = previous.content[:SUMMARY_MAX_CHARS] if previous else ""
+        transcript = "\n".join(
+            f"{turn.role.capitalize()}: {turn.content[:SUMMARY_TURN_CHARS]}" for turn in older_turns
+        )
         summary_text = ""
         if router_or_provider is not None:
             try:
-                summary_prompt = [
-                    ChatMessage(
-                        role="system",
-                        content=(
-                            "You are a concise summarizer. In 1 to 2 clear sentences, summarize the key topics, "
-                            "decisions, and context discussed in the following dialogue transcript. "
-                            "Do not use markdown, lists, or filler. Provide only the concise factual summary."
+                response = router_or_provider.send(
+                    [
+                        ChatMessage(
+                            role="system",
+                            content=(
+                                "Update the previous conversation summary with the new dialogue. "
+                                "Keep key topics, facts, and decisions in 1 to 2 clear sentences. "
+                                "Provide only the concise factual summary."
+                            ),
                         ),
-                    ),
-                    ChatMessage(
-                        role="user",
-                        content=f"Transcript to summarize:\n{transcript_text}",
-                    ),
-                ]
-                resp = router_or_provider.send(
-                    summary_prompt,
+                        ChatMessage(
+                            role="user",
+                            content=(
+                                f"Previous summary:\n{previous_text}\nNew dialogue:\n{transcript}"
+                            ),
+                        ),
+                    ],
                     temperature=0.3,
                     max_tokens=150,
                 )
-                summary_text = resp.content.strip()
+                summary_text = response.content.strip()[:SUMMARY_MAX_CHARS]
             except Exception as err:
-                logger.warning("LLM summarization failed (%s) — using rule-based fallback.", err)
-
+                logger.warning("LLM summarization failed (%s); using fallback.", err)
         if not summary_text:
-            # Rule-based fallback summary if router/provider is offline or not passed
-            topics = [t.content[:40] + "..." for t in older_turns[:3]]
-            summary_text = f"Previously discussed topics included: {'; '.join(topics)}."
+            topics = "; ".join(turn.content[:100] for turn in older_turns[:3])
+            summary_text = f"{previous_text} Previously discussed: {topics}.".strip()
+            summary_text = summary_text[-SUMMARY_MAX_CHARS:]
 
-        # Save summary to SQLite
-        self.store.save_memory(
-            MemoryItem(
-                content=summary_text,
-                memory_type=MemoryType.CONVERSATION,
-                source="auto_summarizer",
-                metadata={"session_id": self.session_id, "older_turns_count": len(older_turns)},
+        with self._lock:
+            if generation != self._generation:
+                return None
+            self.store.save_memory(
+                MemoryItem(
+                    id=previous.id if previous else None,
+                    content=summary_text,
+                    memory_type=MemoryType.CONVERSATION,
+                    source="auto_summarizer",
+                    metadata={
+                        "session_id": self.session_id,
+                        "last_turn_id": older_turns[-1].id,
+                        "older_turns_count": (
+                            previous.metadata.get("older_turns_count", 0) if previous else 0
+                        )
+                        + len(older_turns),
+                    },
+                )
             )
-        )
-        self._cached_summary = summary_text
+            self._cached_summary = summary_text
         logger.info(
-            "Summarized %d older turns for session '%s': '%s'",
-            len(older_turns),
-            self.session_id,
-            summary_text,
+            "Summarized %d new older turns for session '%s'", len(older_turns), self.session_id
         )
         return summary_text
 
     def clear_session(self) -> int:
-        """Clear all turns and cached summary for the current session."""
-        cleared = self.store.clear_session(self.session_id)
-        self._cached_summary = None
+        """Clear persisted context and invalidate any summary currently being generated."""
+        with self._lock:
+            cleared = self.store.clear_session(self.session_id)
+            self._generation += 1
+            self._cached_summary = None
         logger.info("Cleared %d turns for session '%s'", cleared, self.session_id)
         return cleared

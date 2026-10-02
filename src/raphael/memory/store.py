@@ -26,10 +26,13 @@ class MemoryStore:
 
         self._lock = threading.Lock()
         self._local = threading.local()
+        self._memory_connection: sqlite3.Connection | None = None
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Return a thread-local SQLite connection with WAL mode and row factory."""
+        if self._is_in_memory and self._memory_connection is not None:
+            return self._memory_connection
         if not hasattr(self._local, "conn") or self._local.conn is None:
             conn = sqlite3.connect(
                 self.db_path_str,
@@ -43,6 +46,8 @@ class MemoryStore:
             conn.execute("PRAGMA foreign_keys=ON;")
             conn.execute("PRAGMA busy_timeout=5000;")
             self._local.conn = conn
+            if self._is_in_memory:
+                self._memory_connection = conn
         return self._local.conn
 
     def _init_db(self) -> None:
@@ -86,7 +91,8 @@ class MemoryStore:
                     "CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);"
                 )
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_conv_session ON conversation_turns(session_id, timestamp);"
+                    "CREATE INDEX IF NOT EXISTS idx_conv_session "
+                    "ON conversation_turns(session_id, timestamp);"
                 )
             logger.debug("Memory database initialized at %s", self.db_path_str)
 
@@ -184,9 +190,7 @@ class MemoryStore:
 
             if memory_type is not None:
                 type_val = (
-                    memory_type.value
-                    if isinstance(memory_type, MemoryType)
-                    else str(memory_type)
+                    memory_type.value if isinstance(memory_type, MemoryType) else str(memory_type)
                 )
                 conditions.append("memory_type = ?")
                 params.append(type_val)
@@ -208,12 +212,11 @@ class MemoryStore:
             conn = self._get_connection()
             if memory_type is not None:
                 type_val = (
-                    memory_type.value
-                    if isinstance(memory_type, MemoryType)
-                    else str(memory_type)
+                    memory_type.value if isinstance(memory_type, MemoryType) else str(memory_type)
                 )
                 cursor = conn.execute(
-                    "SELECT * FROM memories WHERE memory_type = ? ORDER BY updated_at DESC LIMIT ?;",
+                    "SELECT * FROM memories WHERE memory_type = ? "
+                    "ORDER BY updated_at DESC LIMIT ?;",
                     (type_val, limit),
                 )
             else:
@@ -248,9 +251,7 @@ class MemoryStore:
             conn = self._get_connection()
             if memory_type is not None:
                 type_val = (
-                    memory_type.value
-                    if isinstance(memory_type, MemoryType)
-                    else str(memory_type)
+                    memory_type.value if isinstance(memory_type, MemoryType) else str(memory_type)
                 )
                 cursor = conn.execute(
                     "SELECT COUNT(*) FROM memories WHERE memory_type = ?;",
@@ -313,8 +314,55 @@ class MemoryStore:
             )
             return [self._row_to_turn(r) for r in cursor.fetchall()]
 
+    def get_session_summary(self, session_id: str) -> MemoryItem | None:
+        """Retrieve the latest summary using exact metadata identity."""
+        with self._lock:
+            row = (
+                self._get_connection()
+                .execute(
+                    "SELECT * FROM memories WHERE memory_type = ? "
+                    "AND json_extract(metadata_json, '$.session_id') = ? "
+                    "ORDER BY updated_at DESC, id DESC LIMIT 1;",
+                    (MemoryType.CONVERSATION.value, session_id),
+                )
+                .fetchone()
+            )
+            if not row:
+                return None
+            summary = self._row_to_memory(row)
+            # Older releases stored a count rather than an ID. Infer the cursor
+            # once from that count so an upgrade does not repeat old requests.
+            if "last_turn_id" not in summary.metadata:
+                count = summary.metadata.get("older_turns_count", 0)
+                if isinstance(count, int) and count > 0:
+                    turn = self._get_connection().execute(
+                        "SELECT id FROM conversation_turns WHERE session_id = ? "
+                        "ORDER BY id ASC LIMIT 1 OFFSET ?;",
+                        (session_id, count - 1),
+                    ).fetchone()
+                    if turn:
+                        summary.metadata["last_turn_id"] = turn["id"]
+            return summary
+
+    def get_summary_batch(
+        self, session_id: str, after_id: int, keep_recent: int, limit: int
+    ) -> list[ConversationTurn]:
+        """Read a bounded batch of new turns outside the active context window."""
+        with self._lock:
+            rows = (
+                self._get_connection()
+                .execute(
+                    "SELECT * FROM conversation_turns WHERE session_id = ? AND id > ? "
+                    "AND id NOT IN (SELECT id FROM conversation_turns WHERE session_id = ? "
+                    "ORDER BY id DESC LIMIT ?) ORDER BY id ASC LIMIT ?;",
+                    (session_id, after_id, session_id, keep_recent, limit),
+                )
+                .fetchall()
+            )
+            return [self._row_to_turn(row) for row in rows]
+
     def clear_session(self, session_id: str) -> int:
-        """Clear all conversation turns for a given session ID."""
+        """Atomically clear a session's turns and persisted summaries."""
         with self._lock:
             conn = self._get_connection()
             with conn:
@@ -322,7 +370,13 @@ class MemoryStore:
                     "DELETE FROM conversation_turns WHERE session_id = ?;",
                     (session_id,),
                 )
-                return cursor.rowcount
+                cleared = cursor.rowcount
+                conn.execute(
+                    "DELETE FROM memories WHERE memory_type = ? "
+                    "AND json_extract(metadata_json, '$.session_id') = ?;",
+                    (MemoryType.CONVERSATION.value, session_id),
+                )
+                return cleared
 
     # -------------------------------------------------------------------------
     # Helper / Conversion Methods
@@ -385,3 +439,5 @@ class MemoryStore:
             except Exception:
                 pass
             self._local.conn = None
+            if self._is_in_memory:
+                self._memory_connection = None
