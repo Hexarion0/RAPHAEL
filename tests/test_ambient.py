@@ -159,7 +159,7 @@ def test_vad_preserves_partial_chunks_and_converts_integer_audio(monkeypatch):
 def run_callbacks(
     tmp_path, monkeypatch, utterances, *, ambient=True, router=None, observed=None,
     tts=None, interrupted=None,
-    streaming=False,
+    streaming=False, clock=None,
 ):
     """Run real CLI callbacks using an isolated DB and no audio hardware."""
     import sys
@@ -199,7 +199,7 @@ def run_callbacks(
     monkeypatch.setattr(audio, "WakeListenerLoop", listener)
     # Patch only the CLI clock: background provider threads use real time.sleep.
     monkeypatch.setattr(__main__, "time", SimpleNamespace(
-        sleep=interrupt, monotonic=__main__.time.monotonic,
+        sleep=interrupt, monotonic=clock or __main__.time.monotonic,
     ))
     monkeypatch.setattr(sys, "argv", ["raphael", "--ambient" if ambient else "--listen"])
     assert __main__.main() == 0
@@ -314,11 +314,14 @@ def test_live_stream_interrupted_after_audio_starts_archives_partial_reply(tmp_p
 
     tts.speak.side_effect = speak
     _router, _tts, _loop, store, turns = run_callbacks(
-        tmp_path, monkeypatch, [("Raphael, explain streaming.", {"cancel_event": cancel})],
+        tmp_path, monkeypatch,
+        [("Raphael, explain streaming.", {"cancel_event": cancel}),
+         ("", {"supersedes_cancel_event": cancel})],
         router=router, tts=tts, streaming=True,
     )
     try:
         assert [turn.role for turn in turns] == ["user", "assistant"]
+        router.stream.assert_called_once()  # Empty noise must not restart partial playback.
         assert turns[-1].content.endswith("[Playback was interrupted.]")
         assert "First sentence." in turns[-1].content
         assert [call.args[0] for call in tts.speak.call_args_list] == ["First sentence."]
@@ -754,5 +757,112 @@ def test_live_log_addresses_reply_without_speech_gate(tmp_path, monkeypatch, tex
         assert router.send.call_args.args[0][-1].content == query
         tts.speak.assert_called_once()
         assert turns[0].content == query
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("ambient", [True, False])
+def test_empty_interruption_restores_superseded_question(tmp_path, monkeypatch, ambient):
+    canceled, replacement = Event(), Event()
+    canceled.set()
+    router = MagicMock()
+    router.send.return_value = LLMResponse('Here is what I can do.', 'test', 'test')
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [('', {'cancel_event': replacement, 'supersedes_cancel_event': canceled})],
+        ambient=ambient, router=router,
+        observed=[('Raphael, what are you good at?', {
+            'superseded': True, 'cancel_event': canceled,
+        })],
+    )
+    try:
+        router.send.assert_called_once()
+        assert router.send.call_args.args[0][-1].content == 'what are you good at?'
+        assert [(turn.role, turn.content) for turn in turns] == [
+            ('user', 'what are you good at?'), ('assistant', 'Here is what I can do.'),
+        ]
+        tts.speak.assert_called_once()
+    finally:
+        store.close()
+
+
+def test_empty_interruption_retries_without_duplicate_history(tmp_path, monkeypatch):
+    canceled, replacement = Event(), Event()
+    router = MagicMock()
+
+    def respond(messages, **kwargs):
+        if router.send.call_count == 1:
+            canceled.set()
+            return LLMResponse('Discard me.', 'test', 'test')
+        return LLMResponse('The answer.', 'test', 'test')
+
+    router.send.side_effect = respond
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [('Raphael, explain this.', {'cancel_event': canceled}),
+         ('', {'cancel_event': replacement, 'supersedes_cancel_event': canceled})],
+        router=router,
+    )
+    try:
+        assert router.send.call_count == 2
+        assert [m.content for m in router.send.call_args.args[0] if m.role == 'user'] == [
+            'explain this.',
+        ]
+        assert [(turn.role, turn.content) for turn in turns] == [
+            ('user', 'explain this.'), ('assistant', 'The answer.'),
+        ]
+        tts.speak.assert_called_once()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('case', ['unlinked', 'expired', 'unclear'])
+def test_empty_audio_does_not_restore_unrelated_or_unclear_requests(tmp_path, monkeypatch, case):
+    canceled = Event()
+    canceled.set()
+    info = {'supersedes_cancel_event': canceled}
+    clock = None
+    if case == 'unlinked':
+        info['supersedes_cancel_event'] = Event()
+    elif case == 'unclear':
+        info.update(stt_raw_text='possibly stop', stt_needs_repeat=True)
+    else:
+        # observe_transcript records at time zero; restoration occurs after expiry.
+        times = iter([0.0, 1000.0])
+        def clock():
+            return next(times)
+    router = MagicMock()
+    router.send.return_value = LLMResponse('{"addressed": false}', 'test', 'test')
+    _router, _tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch, [('', info)], router=router, clock=clock,
+        observed=[('Raphael, explain this.', {'superseded': True, 'cancel_event': canceled})],
+    )
+    try:
+        assert all(
+            call.kwargs.get('purpose') == 'speech_gate' for call in router.send.call_args_list
+        )
+        assert turns == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('ambient', [True, False])
+def test_empty_recovery_cannot_execute_a_memory_write(tmp_path, monkeypatch, ambient):
+    canceled = Event()
+    canceled.set()
+    handler = MagicMock(return_value=None)
+    monkeypatch.setattr('raphael.memory.service.MemoryService.handle', handler)
+    router = MagicMock()
+    router.send.return_value = LLMResponse('I heard your request.', 'test', 'test')
+    _router, _tts, _loop, store, _turns = run_callbacks(
+        tmp_path, monkeypatch, [('', {'supersedes_cancel_event': canceled})],
+        ambient=ambient, router=router,
+        observed=[('Raphael, remember my name is Alex.', {
+            'superseded': True, 'cancel_event': canceled,
+        })],
+    )
+    try:
+        handler.assert_not_called()
+        assert store.get_fact('user:preferred_name') is None
     finally:
         store.close()

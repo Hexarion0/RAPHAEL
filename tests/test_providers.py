@@ -300,3 +300,158 @@ def test_nim_transient_http_errors_retry_then_use_backup(mock_sleep, mock_post):
     assert provider.send("Hello").content == "backup answer"
     assert mock_post.call_count == 4
     assert mock_sleep.call_count == 2  # No pointless delay after the last failure.
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("status", [404, 410, 401, 403, 503])
+def test_nim_http_fallback_policy(monkeypatch, streaming, status):
+    """Retirement skips retries; auth fails fast; transient errors retry twice."""
+    import httpx
+
+    requests = []
+    provider = NimProvider(api_key="test", model="retired-model")
+    provider.fallback_model = "backup-model"
+
+    def handle(request):
+        import json
+
+        model = json.loads(request.content)["model"]
+        requests.append(model)
+        if model == "retired-model":
+            return httpx.Response(status)
+        if streaming:
+            return httpx.Response(200, text=(
+                'data: {"choices": []}\n\n'
+                'data: {"choices": [{"delta": {"content": "Backup."}}]}\n\n'
+                'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\n'
+            ))
+        return completion("Backup.")
+
+    client_class = httpx.Client
+    monkeypatch.setattr("httpx.Client", lambda **kw: client_class(
+        transport=httpx.MockTransport(handle), **kw,
+    ))
+    sleeper = MagicMock()
+    monkeypatch.setattr("raphael.providers.nim.time.sleep", sleeper)
+
+    def reply():
+        if streaming:
+            chunks = list(provider.stream("Hello"))
+            assert chunks[-1].is_final
+            return "".join(chunk.delta for chunk in chunks)
+        return provider.send("Hello").content
+
+    if status in (401, 403):
+        with pytest.raises(httpx.HTTPStatusError):
+            reply()
+        assert requests == ["retired-model"]
+    else:
+        assert reply() == "Backup."
+        assert requests == ["retired-model"] * (3 if status == 503 else 1) + ["backup-model"]
+    assert sleeper.call_count == (2 if status == 503 else 0)
+
+
+def test_nim_failed_stream_backup_is_attempted_only_once(monkeypatch):
+    import httpx
+
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(410 if len(requests) == 1 else 503)
+
+    client_class = httpx.Client
+    monkeypatch.setattr("httpx.Client", lambda **kw: client_class(
+        transport=httpx.MockTransport(handle), **kw,
+    ))
+    provider = NimProvider(api_key="test", model="retired-model")
+    provider.fallback_model = "backup-model"
+    with pytest.raises(httpx.HTTPStatusError):
+        list(provider.stream("Hello"))
+    assert len(requests) == 2
+
+
+def test_nim_canceled_retirement_response_does_not_try_backup(monkeypatch):
+    from threading import Event
+
+    import httpx
+
+    cancel = Event()
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        cancel.set()
+        return httpx.Response(410)
+
+    client_class = httpx.Client
+    monkeypatch.setattr("httpx.Client", lambda **kw: client_class(
+        transport=httpx.MockTransport(handle), **kw,
+    ))
+    provider = NimProvider(api_key="test", model="retired-model")
+    assert list(provider.stream("Hello", cancel_event=cancel)) == []
+    assert len(requests) == 1
+
+
+def test_nim_stream_stops_at_finish_reason_without_waiting_for_done(monkeypatch):
+    client, response = MagicMock(), MagicMock()
+    client.__enter__.return_value = client
+    client.stream.return_value.__enter__.return_value = response
+
+    def lines():
+        yield 'data: {"choices": []}'
+        yield 'data: {"choices": [{"delta": {"content": "Hi!"}, "finish_reason": "stop"}]}'
+        raise AssertionError("Should not wait for another SSE event after the final choice")
+
+    response.iter_lines.side_effect = lines
+    monkeypatch.setattr("httpx.Client", lambda **kw: client)
+    chunks = list(NimProvider(api_key="test").stream("Hello"))
+    assert "".join(part.delta for part in chunks) == "Hi!"
+    assert chunks[-1].is_final
+
+
+@pytest.mark.parametrize("thinking", [None, True])
+def test_lightning_uses_final_answer_mode_by_default(thinking):
+    model = "nvidia/nemotron-3.5-lightning-30b-a3b"
+    payload = {"model": model}
+    if thinking is not None:
+        payload["chat_template_kwargs"] = {"enable_thinking": thinking}
+    prepared = NimProvider._model_payload(payload, model)
+    assert prepared["chat_template_kwargs"]["enable_thinking"] is (thinking or False)
+
+
+@pytest.mark.parametrize('partial', [False, True])
+def test_nim_only_falls_back_before_visible_stream_content(monkeypatch, partial):
+    import httpx
+
+    client, primary, backup = MagicMock(), MagicMock(), MagicMock()
+    client.__enter__.return_value = client
+    client.stream.side_effect = [primary, backup]
+    first = primary.__enter__.return_value
+    second = backup.__enter__.return_value
+
+    def lines():
+        if partial:
+            yield 'data: {"choices": [{"delta": {"content": "Partial."}}]}'
+            raise httpx.ReadError('Disconnected')
+        yield 'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}'
+
+    first.iter_lines.side_effect = lines
+    second.iter_lines.return_value = iter([
+        'data: {"choices": [{"delta": {"content": "Backup."}, "finish_reason": "stop"}]}',
+    ])
+    monkeypatch.setattr('httpx.Client', lambda **kw: client)
+    provider = NimProvider(api_key='test', model='primary')
+    provider.fallback_model = 'backup'
+    stream = provider.stream('Hello')
+    if partial:
+        assert next(stream).delta == 'Partial.'
+        with pytest.raises(httpx.ReadError):
+            next(stream)
+        assert client.stream.call_count == 1
+    else:
+        chunks = list(stream)
+        assert [chunk.delta for chunk in chunks] == ['Backup.', '']
+        assert chunks[-1].is_final
+        assert all(chunk.model == 'backup' for chunk in chunks)
+        assert client.stream.call_count == 2

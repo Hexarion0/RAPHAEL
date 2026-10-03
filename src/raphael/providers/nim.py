@@ -19,7 +19,7 @@ class NimProvider(LLMProvider):
     """Client for NVIDIA NIM (Inference Microservice) Cloud API."""
 
     name: str = "nim"
-    default_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    default_model: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
     base_url: str = "https://integrate.api.nvidia.com/v1"
 
     def __init__(
@@ -74,7 +74,7 @@ class NimProvider(LLMProvider):
     def _model_payload(payload: dict[str, Any], model: str) -> dict[str, Any]:
         """Use final-answer mode for Nemotron 3 unless the caller explicitly opts in."""
         prepared = {**payload, "model": model}
-        if model.startswith("nvidia/nemotron-3-"):
+        if model.startswith(("nvidia/nemotron-3-", "nvidia/nemotron-3.5-")):
             template = prepared.get("chat_template_kwargs") or {}
             prepared["chat_template_kwargs"] = {"enable_thinking": False, **template}
         elif model != payload["model"]:
@@ -141,10 +141,14 @@ class NimProvider(LLMProvider):
             try:
                 data = complete(target_model, 3)
             except httpx.HTTPStatusError as err:
-                if err.response.status_code not in retryable or target_model == fallback_model:
+                if (
+                    err.response.status_code not in (*retryable, 404, 410)
+                    or target_model == fallback_model
+                ):
                     raise
                 logger.warning(
-                    "NIM '%s' exhausted retries; trying '%s'.", target_model, fallback_model
+                    "NIM '%s' HTTP %d; trying '%s'.",
+                    target_model, err.response.status_code, fallback_model,
                 )
                 target_model = fallback_model
                 data = complete(target_model, 1)
@@ -258,7 +262,7 @@ class NimProvider(LLMProvider):
         max_tokens: int = 1024,
         **kwargs: Any,
     ) -> Iterator[LLMStreamChunk]:
-        """Stream completion chunks, retrying three times before falling back."""
+        """Retry transient failures; switch retired models before any text is emitted."""
         cancel_event = kwargs.pop("cancel_event", None)
         if cancel_event is not None and cancel_event.is_set():
             return
@@ -297,18 +301,29 @@ class NimProvider(LLMProvider):
                         continue
                     data_str = line[len("data:") :].strip()
                     if data_str == "[DONE]":
-                        yield LLMStreamChunk(
-                            delta="", model=active_model, provider=self.name, is_final=True
-                        )
+                        if emitted:
+                            yield LLMStreamChunk(
+                                delta="", model=active_model, provider=self.name, is_final=True
+                            )
                         break
                     try:
                         chunk_json = json.loads(data_str)
-                        delta = chunk_json["choices"][0]["delta"].get("content", "")
+                        choices = chunk_json.get("choices") or []
+                        if not choices:
+                            continue  # Usage-only SSE event.
+                        choice = choices[0]
+                        delta = (choice.get("delta") or {}).get("content", "")
                         if delta:
                             emitted = True
                             yield LLMStreamChunk(
                                 delta=delta, model=active_model, provider=self.name, is_final=False
                             )
+                        if choice.get("finish_reason") is not None:
+                            if emitted:
+                                yield LLMStreamChunk(
+                                    delta="", model=active_model, provider=self.name, is_final=True
+                                )
+                            return
                     except json.JSONDecodeError:
                         continue
 
@@ -319,19 +334,17 @@ class NimProvider(LLMProvider):
                     return
                 try:
                     yield from _iter_stream(client, target_model)
-                    if not emitted and (cancel_event is None or not cancel_event.is_set()):
-                        if target_model != fallback_model:
-                            yield from _iter_stream(client, fallback_model)
-                        if not emitted:
-                            raise RuntimeError("NIM stream returned no reply text")
-                    return
                 except httpx.HTTPStatusError as err:
                     if emitted:
                         raise
                     last_err = err
+                    if err.response.status_code in (404, 410):
+                        break  # Retrying a retired or missing model cannot help.
                     if err.response.status_code not in RETRYABLE:
                         raise
-                    wait = 0.5 * (2**attempt)  # 0.5s → 1s → 2s
+                    if attempt == MAX_RETRIES - 1:
+                        break
+                    wait = 0.5 * (2**attempt)
                     logger.warning(
                         "NIM stream '%s' HTTP %d (attempt %d/%d) — retrying in %.1fs...",
                         target_model,
@@ -345,16 +358,21 @@ class NimProvider(LLMProvider):
                             return
                     else:
                         time.sleep(wait)
-
-            # All retries exhausted — fall back once
-            if last_err is not None:
-                if target_model != fallback_model:
-                    logger.warning(
-                        "NIM stream '%s' failed after %d retries. Falling back to '%s'.",
-                        target_model,
-                        MAX_RETRIES,
-                        fallback_model,
-                    )
-                    yield from _iter_stream(client, fallback_model)
                 else:
-                    raise last_err
+                    if emitted:
+                        return
+                    break
+
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            # Exactly one backup attempt, outside the primary retry loop.
+            if target_model != fallback_model:
+                logger.warning(
+                    "NIM stream '%s' unavailable or empty; trying '%s'.",
+                    target_model, fallback_model,
+                )
+                yield from _iter_stream(client, fallback_model)
+            elif last_err is not None:
+                raise last_err
+            if not emitted and (cancel_event is None or not cancel_event.is_set()):
+                raise RuntimeError("NIM stream returned no reply text")

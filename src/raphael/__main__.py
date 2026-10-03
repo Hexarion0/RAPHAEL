@@ -240,7 +240,7 @@ def main() -> int:
             enabled=settings.audio.tts_enabled,
         )
         router = get_model_router()
-        from raphael.audio.ambient import AmbientConversation
+        from raphael.audio.ambient import AmbientConversation, SpeechDecision
 
         ambient_enabled = [
             settings.audio.ambient_listening if args.ambient is None else args.ambient
@@ -327,22 +327,37 @@ def main() -> int:
             user_text = text.strip()
             raw = wake_info.get("stt_raw_text", user_text)
             earlier_fragments = linked_fragments(wake_info)
+            # Resume only an exact canceled request that has not reached playback.
+            # Empty noise is not a new user instruction or permission to write facts.
+            restored_fragments = (
+                earlier_fragments if (
+                    not user_text and not raw and not wake_info.get("stt_needs_repeat")
+                    and not unfinished_request[0].get("reply_started")
+                ) else []
+            )
+            if restored_fragments:
+                user_text = "\n".join(restored_fragments)
+                earlier_fragments = []
+                logger.info("Resuming the pending request after an empty interruption.")
             decision = None
             if ambient_enabled[0]:
-                decision = ambient_context.decide(
-                    user_text or (raw if wake_info.get("stt_needs_repeat") else ""),
-                    router,
-                    [
-                        # Do not include unrelated session summaries or saved facts.
-                        # Only the last exchange helps determine a possible follow-up.
-                        ChatMessage(turn.role, turn.content)
-                        for turn in conv_manager.get_recent_turns(limit=4)
-                    ],
-                    started_at=wake_info.get("speech_started_at"),
-                    verified_wake=bool(wake_info.get("wake_verified")),
-                    during_reply=bool(wake_info.get("during_reply")),
-                    unfinished_request=earlier_fragments,
-                )
+                if restored_fragments:
+                    decision = SpeechDecision(True, reason="resumed_after_empty_audio")
+                else:
+                    decision = ambient_context.decide(
+                        user_text or (raw if wake_info.get("stt_needs_repeat") else ""),
+                        router,
+                        [
+                            # Do not include unrelated session summaries or saved facts.
+                            # Only the last exchange helps determine a possible follow-up.
+                            ChatMessage(turn.role, turn.content)
+                            for turn in conv_manager.get_recent_turns(limit=4)
+                        ],
+                        started_at=wake_info.get("speech_started_at"),
+                        verified_wake=bool(wake_info.get("wake_verified")),
+                        during_reply=bool(wake_info.get("during_reply")),
+                        unfinished_request=earlier_fragments,
+                    )
                 logger.info(
                     "Ambient decision: %s (%s).",
                     "reply" if decision.addressed else "silent", decision.reason,
@@ -359,7 +374,8 @@ def main() -> int:
                 _in_followup[0] = False
                 return False
 
-            logger.info('🗣️ You: "%s"', user_text)
+            if not restored_fragments:
+                logger.info('🗣️ You: "%s"', user_text)
 
             # Clean wake phrase from user query
             cleaned_query = strip_wake_phrase(user_text, settings.audio.wake_word)
@@ -412,7 +428,9 @@ def main() -> int:
 
             # Guessed follow-up intent or uncertain recognition must not write facts.
             reliable = wake_info.get("stt_confidence", 1.0) >= settings.audio.stt_retry_confidence
-            allow_memory = reliable and (decision is None or decision.explicit)
+            allow_memory = (
+                not restored_fragments and reliable and (decision is None or decision.explicit)
+            )
             memory_reply = memory_service.handle(cleaned_query) if allow_memory else None
             if memory_reply is not None:
                 conv_manager.add_turn(role="user", content=cleaned_query)
@@ -437,7 +455,7 @@ def main() -> int:
                 return False
 
             # Record user turn in persistent SQLite session
-            combined_fragments = (earlier_fragments + [cleaned_query])[-5:]
+            combined_fragments = restored_fragments or (earlier_fragments + [cleaned_query])[-5:]
             request = {
                 "cancel_event": cancel_event, "fragments": combined_fragments,
                 "started_at": time.monotonic(),
@@ -447,7 +465,8 @@ def main() -> int:
             pending_speech.clear()
             for fragment in added_speech:
                 conv_manager.add_turn(role="user", content=fragment)
-            conv_manager.add_turn(role="user", content=cleaned_query)
+            if not restored_fragments:
+                conv_manager.add_turn(role="user", content=cleaned_query)
             local_reply = answer_clock_query(cleaned_query)
             if local_reply is not None and not earlier_fragments and not added_speech:
                 conv_manager.add_turn(
@@ -502,11 +521,14 @@ def main() -> int:
                 "The original transcript stays the record. Never claim a guess was saved."
             )
             context_messages = conv_manager.get_active_messages(system_prompt=system_prompt)
-            if earlier_fragments or added_speech:
+            if earlier_fragments or added_speech or restored_fragments:
                 # Keep each original transcript in SQLite, but present this pending
                 # request as one user message to the model. Remove matching tail
                 # fragments to avoid sending the same request twice.
-                parts = combined_fragments if earlier_fragments else added_speech + [cleaned_query]
+                parts = (
+                    combined_fragments if earlier_fragments or restored_fragments
+                    else added_speech + [cleaned_query]
+                )
                 for fragment in reversed(parts):
                     if (
                         context_messages[-1].role == "user"
@@ -527,6 +549,7 @@ def main() -> int:
                         router, context_messages, tts, current, cancel_event=cancel_event,
                     )
                     response = streamed.response
+                    request["reply_started"] = streamed.first_audio_seconds is not None
                 else:
                     response = router.send(context_messages, temperature=0.7, max_tokens=400)
                 if not current():
@@ -565,6 +588,7 @@ def main() -> int:
                 # Summaries run separately so the next reply never waits for an extra LLM call.
                 conv_manager.schedule_summary(router_or_provider=router)
                 if streamed is None:
+                    request["reply_started"] = True
                     said = say(reply_text)
                 else:
                     said = streamed.spoken

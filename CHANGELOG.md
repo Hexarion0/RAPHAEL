@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1 — 2026-10-03 (development)
+
+- Replace the retired default NIM model with Nemotron 3.5 Lightning and keep
+  thinking disabled for conversational replies.
+- Try the configured NIM backup immediately on HTTP 404/410 in both batch and
+  streaming modes. Preserve transient retries and cancellation without restarting
+  a partially emitted answer. Handle usage-only and terminal SSE events.
+- Resume an unanswered, directly linked question when a false interruption
+  produces empty STT output. Keep original history once, reject expired or
+  unrelated requests, and avoid replaying memory writes or partial playback.
+
 ## 0.3.0 — 2026-10-03 (development)
 
 - Speak completed sentences while provider generation continues. Filter reasoning

@@ -115,7 +115,7 @@ def run_setup_wizard() -> None:
     defaults = {
         "RAPHAEL_ENV": "development",
         "RAPHAEL_LOG_LEVEL": "INFO",
-        "NIM_MODEL": "nvidia/nemotron-3-super-120b-a12b",
+        "NIM_MODEL": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "OLLAMA_HOST": "http://localhost:11434",
         "WAKE_WORD": "hey raphael",
         "WAKE_THRESHOLD": "0.5",

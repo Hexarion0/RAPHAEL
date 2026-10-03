@@ -93,6 +93,28 @@ and private audio out of reports.
     used again and its temporary CUDA model must be released afterward. Record
     GPU memory and transcript quality; this does not prove hum rejection by itself.
 
+## Recorded validation — 2026-10-03 (v0.3.1 patch)
+
+- 375 unit tests passed; three hardware/model integrations excluded. Ruff,
+  `git diff --check`, and `python -m raphael --version` passed.
+- Authenticated NIM requests confirmed the old default model returned HTTP 410
+  with retirement time 2026-10-03 09:00 UTC (16:00 Asia/Hovd).
+- Updated the local `NIM_MODEL` and package defaults to
+  `nvidia/nemotron-3.5-lightning-30b-a3b`. A synthetic greeting through the real
+  streaming provider produced its first text in 0.98s and completed in 1.02s.
+  This measures provider text, not microphone-to-speaker latency.
+- Regressions cover missing/retired models, transient retries, authentication
+  failures, cancellation, single backup attempts, empty streams, terminal SSE
+  events, and refusing fallback after partial output.
+- Empty-interruption recovery is tested before STT delivery and during generation,
+  without duplicate history, memory writes, expired-request replay, or restarting
+  partial playback. Live microphone acceptance remains pending.
+- Reproduce the reported audio case with headphones, `small.en` on CUDA with
+  `int8_float16`, Piper, and ambient speech barge-in: ask a question by name, then
+  let a brief non-speech sound trigger recording before the answer starts. When
+  the new STT result is empty, expect `resumed_after_empty_audio` and one answer
+  without repeating the question. Meaningful added speech must still merge.
+
 ## Recorded validation — 2026-10-03 (v0.3 development)
 
 - 350 unit tests passed; three hardware/model integrations excluded.

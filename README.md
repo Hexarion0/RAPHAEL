@@ -2,7 +2,7 @@
 
 > A JARVIS-style, always-listening desktop AI assistant — its own voice, multi-provider AI routing, memory, and messaging integration, built one feature at a time.
 
-**Status:** v0.3.0 development — persistent memory and streamed voice conversations.
+**Status:** v0.3.1 development — persistent memory and streamed voice conversations.
 Live microphone acceptance remains in [`docs/release-checks.md`](docs/release-checks.md).
 
 ---
@@ -92,6 +92,7 @@ Set these in `.env`:
 
 ```text
 NIM_API_KEY=
+NIM_MODEL=nvidia/nemotron-3.5-lightning-30b-a3b
 OPENROUTER_API_KEY=
 GROQ_API_KEY=
 ```
@@ -106,9 +107,12 @@ Piper names use Piper, `*Neural` voices use Edge-TTS, and `mommy`/`fish*` use Fi
 Speech. Explicit engine choices take priority. Fish Speech falls back to an
 installed local Piper voice before trying a network voice.
 
-Nemotron 3 requests disable thinking by default for conversational replies.
-Empty or reasoning-only NIM responses try the configured backup model once;
-reasoning is never used as the spoken answer.
+The default NIM model is `nvidia/nemotron-3.5-lightning-30b-a3b`; existing installs
+should update `NIM_MODEL` in `.env` if it still selects the retired Nemotron 3 Super.
+Nemotron 3 and 3.5 requests disable thinking by default for conversational replies.
+Missing or retired models (HTTP 404/410) immediately try the configured NIM backup.
+Empty or reasoning-only responses also try that backup once; reasoning is never
+used as the spoken answer. Fallback never splices a new answer into partial speech.
 Standalone time and date questions are answered from the local clock without an
 AI request. Background summaries use the economical route (Groq when configured,
 otherwise the default NIM model), with separate `summary` routing logs. Technical
