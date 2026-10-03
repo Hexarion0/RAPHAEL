@@ -165,6 +165,14 @@ class SpeechToText:
                 device=resolved_device,
                 compute_type=resolved_compute,
             )
+            if resolved_device == "cuda":
+                # CTranslate2 loads some CUDA libraries lazily on first inference.
+                # Validate them in the loader, before claiming GPU STT is ready.
+                segments, _info = model.transcribe(
+                    np.zeros(16000, dtype=np.float32), language=self.language,
+                    beam_size=1, vad_filter=False, condition_on_previous_text=False,
+                )
+                list(segments)
             self.device = resolved_device
             self.compute_type = resolved_compute
             return model

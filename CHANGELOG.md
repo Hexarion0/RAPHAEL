@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.2 — 2026-10-04 (development)
+
+- Accept recent feedback about spoken pace and delivery without a cloud speech
+  gate or another wake phrase. Keep the original conversation window after an
+  uncertain fragment; confirmed speech to someone else still ends it.
+- Include speech feedback and answers to the assistant's last question in the
+  follow-up classifier instructions.
+- Add a Linux `gpu` installation extra for CUDA 12 cuBLAS and cuDNN 9, so command
+  STT does not depend on a separate training environment's libraries.
+- Run actual CUDA inference during background model loading before reporting
+  STT ready; missing lazy-loaded libraries trigger the startup CPU fallback.
+
 ## 0.3.1 — 2026-10-03 (development)
 
 - Replace the retired default NIM model with Nemotron 3.5 Lightning and keep

@@ -50,10 +50,29 @@ class AmbientConversation:
     def is_explicit(self, text: str) -> bool:
         return is_direct_address(text, self.wake_phrase)
 
-    def _observe_background(self, text: str) -> None:
+    def _observe_background(self, text: str, *, end_conversation: bool = True) -> None:
         self.background.append((time.monotonic(), text[:300]))
-        self.deadline = 0.0
-        self.interaction.clear()
+        if end_conversation:
+            self.deadline = 0.0
+            self.interaction.clear()
+
+    @staticmethod
+    def _is_speech_feedback(text: str) -> bool:
+        """Recognize bounded feedback about the assistant's recent spoken delivery."""
+        return bool(re.fullmatch(
+            r"(?:hey[, ]+|please[, ]+)?(?:"
+            r"(?:why (?:are you|do you)|you(?: are|'re)) "
+            r"(?:talk(?:ing)?|speak(?:ing)?|read(?:ing)?) "
+            r"(?:so|too|really|very) (?:fast|slow|quickly|slowly|loud|quiet)"
+            r"(?: (?:right now|today))?"
+            r"|(?:(?:can|could|would) you )?(?:please )?"
+            r"(?:speak|talk|read) (?:a (?:little|bit) )?"
+            r"(?:slower|faster|more slowly|more clearly|louder|quieter)"
+            r"|(?:your (?:voice|speech)|you) (?:is|are|sounds?|sound) "
+            r"(?:so|too|really|very) (?:fast|slow|robotic|loud|quiet)"
+            r")(?:[, ]+please)?[.!?]*",
+            text.strip().replace("’", "'"), re.I,
+        ))
 
     def context_note(self) -> str:
         now = time.monotonic()
@@ -102,6 +121,11 @@ class AmbientConversation:
             return SpeechDecision(
                 False, reason="outside_followup_window" if text.strip() else "no_transcript"
             )
+        if (
+            any(message.role == "assistant" for message in self.interaction)
+            and self._is_speech_feedback(text)
+        ):
+            return SpeechDecision(True, reason="speech_feedback")
         payload = {
             "unfinished_addressed_request": unfinished_request or [],
             "recent_dialogue": [
@@ -125,6 +149,9 @@ class AmbientConversation:
                         "repeat the assistant's name. A turn toward someone else is still false. "
                         "Speech to friends/family or an uncertain intended listener means "
                         "addressed=false. A clear follow-up on the same topic can be true. "
+                        "Feedback about the assistant's speech, pace, volume, wording or "
+                        "previous answer is a follow-up, even if it changes the topic. "
+                        "An answer to the assistant's last question need not repeat its name. "
                         "Return only JSON: {\"addressed\": boolean, \"confidence\": number "
                         "between 0 and 1, \"interpretation\": string}. Interpretation may "
                         "suggest a small likely STT mistake only when recent dialogue "
@@ -155,12 +182,19 @@ class AmbientConversation:
                 )
         except (ValueError, TypeError, AttributeError):
             logger.warning("Ambient judgment was not valid JSON; remaining silent.")
-            self._observe_background(text)
+            self._observe_background(text, end_conversation=False)
             return SpeechDecision(False, reason="invalid_judgment")
         except Exception as err:
             # Failed provider calls and malformed judgments must not invite a reply.
             logger.warning("Ambient judgment failed (%s); remaining silent.", err)
-            self._observe_background(text)
+            self._observe_background(text, end_conversation=False)
             return SpeechDecision(False, reason="judgment_failed")
-        self._observe_background(text)
+        # Uncertainty is not evidence that the user left the conversation. Keep
+        # its original deadline so one rejected fragment does not strand follow-ups.
+        clearly_elsewhere = (
+            result.get("addressed") is False
+            and isinstance(confidence, (float, int)) and not isinstance(confidence, bool)
+            and 0.85 <= confidence <= 1
+        )
+        self._observe_background(text, end_conversation=clearly_elsewhere)
         return SpeechDecision(False)

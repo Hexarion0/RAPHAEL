@@ -76,8 +76,12 @@ def test_uncertain_or_malformed_judgment_means_silence(result):
     ambient.replied()
     router = MagicMock()
     router.send.return_value = LLMResponse(result, "test", "test")
+    deadline = ambient.deadline
     assert not ambient.decide("What do you mean?", router, []).addressed
-    assert ambient.deadline == 0
+    if result == '{"addressed": false, "confidence": 0.99}':
+        assert ambient.deadline == 0
+    else:
+        assert ambient.deadline == deadline
 
 
 def test_followup_can_supply_hint_without_replacing_original():
@@ -864,5 +868,91 @@ def test_empty_recovery_cannot_execute_a_memory_write(tmp_path, monkeypatch, amb
     try:
         handler.assert_not_called()
         assert store.get_fact('user:preferred_name') is None
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('text', [
+    'Why are you talking so fast right now?', 'You are speaking too fast.',
+    "You're talking too fast!", 'Could you speak more slowly please?',
+    'Please speak a little slower.', 'Your voice sounds very robotic.',
+    'Can you talk louder?',
+])
+def test_recent_speech_feedback_bypasses_cloud_judgment(text):
+    ambient = AmbientConversation()
+    ambient.record_addressed('assistant', 'Here is what I can do.')
+    router = MagicMock()
+    decision = ambient.decide(text, router, [])
+    assert decision.addressed and not decision.explicit
+    assert decision.reason == 'speech_feedback'
+    router.send.assert_not_called()
+
+
+@pytest.mark.parametrize('text', [
+    'Mom, why are you talking so fast right now?',
+    'Why are you talking so fast right now, Dad?',
+    'She asked why are you talking so fast right now.',
+    'You are talking to my brother.',
+])
+def test_speech_feedback_does_not_bypass_other_listener_or_quoted_speech(text):
+    ambient = AmbientConversation()
+    ambient.record_addressed('assistant', 'Here is what I can do.')
+    router = MagicMock()
+    router.send.return_value = LLMResponse(
+        '{"addressed": false, "confidence": 0.99}', 'test', 'test',
+    )
+    assert not ambient.decide(text, router, []).addressed
+
+
+def test_feedback_requires_recent_assistant_speech(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr('raphael.audio.ambient.time.monotonic', lambda: clock[0])
+    ambient = AmbientConversation()
+    router = MagicMock()
+    router.send.return_value = LLMResponse(
+        '{"addressed": false, "confidence": 0.99}', 'test', 'test',
+    )
+    feedback = 'Why are you talking so fast right now?'
+    assert not ambient.decide(feedback, router, []).addressed
+    ambient.record_addressed('assistant', 'Hello.')
+    clock[0] += 21
+    assert not ambient.decide(feedback, router, []).addressed
+    ambient.record_addressed('user', 'Raphael?')
+    assert not ambient.decide(feedback, router, []).addressed
+
+
+def test_uncertain_fragment_keeps_original_followup_deadline(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr('raphael.audio.ambient.time.monotonic', lambda: clock[0])
+    ambient = AmbientConversation()
+    ambient.record_addressed('assistant', 'Here is what I can do.')
+    original_deadline = ambient.deadline
+    router = MagicMock()
+    router.send.return_value = LLMResponse(
+        '{"addressed": true, "confidence": 0.7}', 'test', 'test',
+    )
+    clock[0] += 5
+    assert not ambient.decide('Something unclear.', router, []).addressed
+    assert ambient.deadline == original_deadline
+    assert ambient.decide('Why are you talking so fast right now?', router, []).addressed
+    clock[0] = original_deadline + 1
+    assert not ambient.decide('Why are you talking so fast right now?', router, []).addressed
+
+
+def test_live_voice_feedback_after_reply_reaches_conversation(tmp_path, monkeypatch):
+    router = MagicMock()
+    router.send.return_value = LLMResponse('Here is what I can do.', 'test', 'test')
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [('Raphael, what are you good at?', {}),
+         ('Why are you talking so fast right now?', {})], router=router,
+    )
+    try:
+        assert router.send.call_count == 2
+        assert all('purpose' not in call.kwargs for call in router.send.call_args_list)
+        assert tts.speak.call_count == 2
+        assert [turn.content for turn in turns if turn.role == 'user'] == [
+            'what are you good at?', 'Why are you talking so fast right now?',
+        ]
     finally:
         store.close()

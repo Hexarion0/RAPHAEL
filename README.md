@@ -2,7 +2,7 @@
 
 > A JARVIS-style, always-listening desktop AI assistant — its own voice, multi-provider AI routing, memory, and messaging integration, built one feature at a time.
 
-**Status:** v0.3.1 development — persistent memory and streamed voice conversations.
+**Status:** v0.3.2 development — persistent memory and streamed voice conversations.
 Live microphone acceptance remains in [`docs/release-checks.md`](docs/release-checks.md).
 
 ---
@@ -160,13 +160,19 @@ Recalled facts include their recorded timestamp so relative statements such as
 included even for informal questions, with elapsed calendar days and inclusive
 development-day counts calculated from a confirmed start date.
 
-For CUDA speech recognition, set `STT_DEVICE=cuda` and
+For CUDA speech recognition, install the runtime libraries in the application
+virtual environment with `.venv/bin/python -m pip install -e ".[gpu]"` (Linux).
+This keeps speech recognition independent of the voice-training environment.
+Then set `STT_DEVICE=cuda` and
 `STT_COMPUTE_TYPE=int8_float16`, then start with
 `./scripts/launch_raphael_gpu.sh --listen`. The launcher adds existing NVIDIA
 library directories from the application or Piper training environment before
 starting Python. It does not install libraries or start training. CUDA 12 cuBLAS
 and cuDNN 9 are required by
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper#gpu).
+Startup runs a short silent inference before reporting CUDA STT ready, because
+these libraries may not load until the first transcription. If it fails, the
+startup log reports the CPU fallback before you speak.
 Keep the smaller command model when voice training shares limited GPU memory.
 Both launch commands run the same application. The script selects `.venv/bin/python`,
 switches to the project folder, and prepares `LD_LIBRARY_PATH`. Running
@@ -228,8 +234,12 @@ listening using `.env` settings, so `./scripts/launch_raphael_gpu.sh` is suffici
 `--no-ambient` selects wake-word mode for one run. Local Silero VAD captures
 speech without a wake phrase at 16 kHz. Direct addresses are handled locally;
 possible follow-ups within `AMBIENT_FOLLOWUP_SECONDS` (40 in the example `.env`)
-use an economical
-`speech_gate` request before a reply. Unclear intent, malformed judgments, provider
+use an economical `speech_gate` request before a reply. Bounded feedback about
+recent spoken delivery, such as “Why are you talking so fast right now?” or
+“Could you speak more slowly?”, is accepted locally during that window. An
+uncertain fragment leaves the original follow-up deadline intact; confirmed speech
+to someone else closes it. This feedback rule permits a response; it does not
+itself change the configured `TTS_SPEED`. Unclear intent, malformed judgments, provider
 failure, and ordinary background conversation default to silence. This estimates
 the intended listener from text and context; it does not identify speakers.
 Ambient onset keeps 800 ms of preceding audio to preserve the greeting while VAD

@@ -93,6 +93,26 @@ and private audio out of reports.
     used again and its temporary CUDA model must be released afterward. Record
     GPU memory and transcript quality; this does not prove hum rejection by itself.
 
+## Recorded validation — 2026-10-04 (v0.3.2 patch)
+
+- 391 unit tests passed; three integrations excluded. Ruff, whitespace checks,
+  and the runtime version command passed.
+- Replayed the reported transcript “Why are you talking so fast right now?”
+  after an assistant reply: accepted locally as `speech_feedback`, without
+  another wake phrase or cloud intent request. Tests retain room-conversation
+  rejection, deadline expiry, and context after uncertain fragments.
+- Installed CUDA 12 cuBLAS and cuDNN 9 into the application `.venv` and tested
+  the cached `small.en` model on the GTX 1660 SUPER using the launcher's library
+  search paths. Actual inference on synthetic silence completed successfully
+  with `cuda/int8_float16`; loading plus inference took 3.11 seconds.
+- Startup regressions force a lazy CUDA-library failure and verify CPU fallback
+  occurs before the ready event. The new `gpu` extra documents reproducible
+  installation independent of the voice-training environment.
+- Live follow-up/wake acceptance with the user's microphone remains pending.
+  Restart the launcher, ask a question by name, then ask “Why are you talking
+  so fast right now?” after the reply; expect `speech_feedback` and a response.
+  This change does not automatically alter `TTS_SPEED`.
+
 ## Recorded validation — 2026-10-03 (v0.3.1 patch)
 
 - 375 unit tests passed; three hardware/model integrations excluded. Ruff,
