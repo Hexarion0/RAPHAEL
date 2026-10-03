@@ -29,4 +29,7 @@ if [[ -n "${CUDA_LIBRARIES}" ]]; then
 fi
 
 cd "${ROOT}"
+if [[ $# -eq 0 ]]; then
+  set -- --listen
+fi
 exec "${PYTHON}" -m raphael "$@"

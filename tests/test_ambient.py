@@ -157,7 +157,8 @@ def test_vad_preserves_partial_chunks_and_converts_integer_audio(monkeypatch):
 
 
 def run_callbacks(
-    tmp_path, monkeypatch, utterances, *, ambient=True, router=None, observed=None
+    tmp_path, monkeypatch, utterances, *, ambient=True, router=None, observed=None,
+    tts=None, interrupted=None,
 ):
     """Run real CLI callbacks using an isolated DB and no audio hardware."""
     import sys
@@ -171,7 +172,7 @@ def run_callbacks(
     monkeypatch.setattr(platform, "get_audio_backend", MagicMock())
     router = router or MagicMock()
     monkeypatch.setattr(providers, "get_model_router", lambda: router)
-    tts = MagicMock()
+    tts = tts or MagicMock()
     for name in ("WakeWordDetector", "SpeechToText", "VoiceRecorder"):
         monkeypatch.setattr(audio, name, MagicMock())
     monkeypatch.setattr(audio, "TextToSpeech", MagicMock(return_value=tts))
@@ -179,6 +180,8 @@ def run_callbacks(
 
     def listener(**kwargs):
         def start():
+            if interrupted:
+                kwargs['on_interruption'](interrupted)
             for text, info in observed or []:
                 kwargs["on_transcript_observed"](text, info)
             for text, info in utterances:
@@ -197,6 +200,93 @@ def run_callbacks(
     store = MemoryStore(settings.memory.db_path)
     turns = store.get_recent_turns(f"desktop_session:{PERSONA_CONTEXT_VERSION}")
     return router, tts, loop, store, turns
+
+
+def test_followup_window_begins_after_long_playback(tmp_path, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr('raphael.audio.ambient.time.monotonic', lambda: clock[0])
+    tts = MagicMock()
+
+    def speak(*_args, **_kwargs):
+        clock[0] += 30  # Longer than the default 20-second follow-up window.
+        return True
+
+    tts.speak.side_effect = speak
+    router = MagicMock()
+    router.send.side_effect = [
+        LLMResponse('{"addressed": true, "confidence": 0.95}', 'test', 'test'),
+        LLMResponse('Let us continue.', 'test', 'test'),
+    ]
+    _router, tts, _loop, store, _turns = run_callbacks(
+        tmp_path, monkeypatch, [('Hey Raphael.', {}), ('Continue?', {})],
+        router=router, tts=tts,
+    )
+    try:
+        assert tts.speak.call_count == 2
+        assert router.send.call_count == 2
+    finally:
+        store.close()
+
+
+def test_interruption_during_long_reply_can_be_judged_after_deadline(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr('raphael.audio.ambient.time.monotonic', lambda: clock[0])
+    ambient = AmbientConversation()
+    ambient.record_addressed('assistant', 'Let me explain the next steps.')
+    clock[0] = 130.0
+    router = MagicMock()
+    router.send.return_value = LLMResponse(
+        '{"addressed": true, "confidence": 0.95}', 'test', 'test'
+    )
+    assert ambient.decide('Wait, also include this.', router, [], during_reply=True).addressed
+    router.send.assert_called_once()
+    ambient.reset()
+    router.reset_mock()
+    assert not ambient.decide('Dinner is ready.', router, [], during_reply=True).addressed
+    router.send.assert_not_called()
+
+
+def test_superseded_request_and_added_words_reach_one_response(tmp_path, monkeypatch):
+    router = MagicMock()
+    router.send.side_effect = [
+        LLMResponse('{"addressed": true, "confidence": 0.95}', 'test', 'test'),
+        LLMResponse('Here is the explanation, with headphones in mind.', 'test', 'test'),
+    ]
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch, [('And include headphone support.', {})], router=router,
+        observed=[('Raphael, explain always listening.', {'superseded': True})],
+    )
+    try:
+        messages = router.send.call_args.args[0]
+        users = [message.content for message in messages if message.role == 'user']
+        assert users == ['explain always listening.', 'And include headphone support.']
+        assert 'same request' in messages[0].content
+        tts.speak.assert_called_once()
+        assert [turn.role for turn in turns] == ['user', 'user', 'assistant']
+    finally:
+        store.close()
+
+
+def test_continue_receives_interrupted_playback_context(tmp_path, monkeypatch):
+    router = MagicMock()
+    router.send.return_value = LLMResponse('And the second step is to test it.', 'test', 'test')
+    context = {
+        'full_text': 'First, configure it. Second, test it.',
+        'estimated_spoken_text': 'First, configure it.',
+        'remaining_text': 'Second, test it.',
+        'played_seconds': 2.0, 'duration_seconds': 4.0,
+    }
+    _router, tts, _loop, store, _turns = run_callbacks(
+        tmp_path, monkeypatch, [('Raphael, continue.', {})], router=router, interrupted=context,
+    )
+    try:
+        system = router.send.call_args.args[0][0].content
+        assert 'previous reply was interrupted' in system
+        assert 'Second, test it.' in system
+        assert 'word boundaries are estimated' in system
+        tts.speak.assert_called_once()
+    finally:
+        store.close()
 
 
 def test_overheard_facts_are_not_saved_or_sent_to_provider(tmp_path, monkeypatch):

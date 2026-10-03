@@ -3,6 +3,7 @@ import asyncio
 import io
 import re
 import threading
+import time
 from pathlib import Path
 
 import edge_tts
@@ -132,6 +133,9 @@ class TextToSpeech:
         self._playback_lock = threading.Lock()
         self._playback_generation = 0
         self._stop_event = threading.Event()  # signals stop() to unblock speak(block=True)
+        self._pending_text = ""
+        self._play_started_at = 0.0
+        self._play_duration = 0.0
 
         if self.enabled:
             logger.info(
@@ -394,8 +398,14 @@ class TextToSpeech:
 
         with self._playback_lock:
             generation = self._playback_generation
+            self._pending_text = self.clean_text_for_speech(text)
+            self._play_started_at = 0.0
+            self._play_duration = 0.0
         synth_result = self.synthesize(text)
         if synth_result is None:
+            with self._playback_lock:
+                if generation == self._playback_generation:
+                    self._pending_text = ""
             return False
 
         audio, sample_rate = synth_result
@@ -406,6 +416,8 @@ class TextToSpeech:
                     return False
                 self._stop_event.clear()
                 self._is_playing = True
+                self._play_started_at = time.monotonic()
+                self._play_duration = audio.size / sample_rate
                 sd.play(audio, samplerate=sample_rate, device=self.output_device)
             if block:
                 # Poll our stop_event instead of calling sd.wait() directly.
@@ -420,6 +432,7 @@ class TextToSpeech:
                 with self._playback_lock:
                     if generation == self._playback_generation:
                         self._is_playing = False
+                        self._pending_text = ""
             else:
                 # Clear playback state when audio finishes or stop is requested.
                 def _wait_done() -> None:
@@ -434,6 +447,7 @@ class TextToSpeech:
                         with self._playback_lock:
                             if generation == self._playback_generation:
                                 self._is_playing = False
+                                self._pending_text = ""
 
                 threading.Thread(target=_wait_done, daemon=True).start()
             return True
@@ -442,21 +456,39 @@ class TextToSpeech:
             self._is_playing = False
             return False
 
-    def stop(self) -> None:
+    def stop(self) -> dict | None:
         """Immediately stop audio playback (barge-in support)."""
         with self._playback_lock:
+            interruption = None
+            if self._pending_text:
+                elapsed = (
+                    max(0.0, time.monotonic() - self._play_started_at)
+                    if self._play_started_at else 0.0
+                )
+                fraction = min(1.0, elapsed / self._play_duration) if self._play_duration else 0.0
+                words = self._pending_text.split()
+                heard = int(len(words) * fraction)
+                interruption = {
+                    "full_text": self._pending_text[:4000],
+                    "estimated_spoken_text": " ".join(words[:heard])[:4000],
+                    "remaining_text": " ".join(words[heard:])[:4000],
+                    "played_seconds": round(elapsed, 2),
+                    "duration_seconds": round(self._play_duration, 2),
+                }
+            self._pending_text = ""
             self._playback_generation += 1
             self._stop_event.set()
             was_playing = self._is_playing
             self._is_playing = False
         if not was_playing:
-            return
+            return interruption
         try:
             sd.stop()
         except Exception as err:
             logger.debug("Error stopping sounddevice: %s", err)
         finally:
             self._is_playing = False
+        return interruption
 
     def is_speaking(self) -> bool:
         """Check whether audio is currently playing."""

@@ -108,12 +108,52 @@ def test_stop_during_synthesis_prevents_late_playback(monkeypatch):
     worker.start()
     try:
         assert entered.wait(1)
-        tts.stop()
+        interruption = tts.stop()
     finally:
         release.set()
         worker.join(timeout=2)
     assert results == [False]
     assert played == []
+    assert interruption['remaining_text'] == 'hello'
+    assert interruption['estimated_spoken_text'] == ''
+    assert interruption['played_seconds'] == 0
+
+
+def test_interrupted_playback_reports_estimated_unheard_text(monkeypatch):
+    from types import SimpleNamespace
+
+    clock = [100.0]
+    monkeypatch.setattr('raphael.audio.tts.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('raphael.audio.tts.sd', SimpleNamespace(
+        play=lambda *_args, **_kwargs: None,
+        get_stream=lambda: SimpleNamespace(active=True), stop=lambda: None,
+    ))
+    tts = TextToSpeech(enabled=False)
+    tts.enabled = True
+    monkeypatch.setattr(tts, 'synthesize', lambda _: (np.ones(80000), 8000))
+    assert tts.speak('one two three four five six seven eight nine ten', block=False)
+    clock[0] += 5
+    interruption = tts.stop()
+    assert interruption['estimated_spoken_text'] == 'one two three four five'
+    assert interruption['remaining_text'] == 'six seven eight nine ten'
+    assert interruption['played_seconds'] == 5
+    assert interruption['duration_seconds'] == 10
+    assert not tts.is_speaking()
+    assert tts.stop() is None  # Do not replay an old interruption on another stop.
+
+
+def test_completed_playback_does_not_report_an_interruption(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr('raphael.audio.tts.sd', SimpleNamespace(
+        play=lambda *_args, **_kwargs: None, get_stream=lambda: SimpleNamespace(active=False),
+        stop=lambda: None,
+    ))
+    tts = TextToSpeech(enabled=False)
+    tts.enabled = True
+    monkeypatch.setattr(tts, 'synthesize', lambda _: (np.ones(8000), 8000))
+    assert tts.speak('This reply finished.')
+    assert tts.stop() is None
 
 
 def test_omitted_engine_uses_selected_piper_voice(monkeypatch):

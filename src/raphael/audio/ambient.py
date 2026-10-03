@@ -71,6 +71,7 @@ class AmbientConversation:
     def decide(
         self, text: str, router: Any, dialogue: list[ChatMessage],
         *, started_at: float | None = None, verified_wake: bool = False,
+        during_reply: bool = False,
     ) -> SpeechDecision:
         """Direct addresses are local; infer only recent follow-ups with high certainty."""
         if verified_wake:
@@ -85,7 +86,7 @@ class AmbientConversation:
             return SpeechDecision(False, reason="addressed_to_someone_else")
         now = time.monotonic()
         began = started_at if started_at is not None and 0 <= started_at <= now else now
-        if not text.strip() or began > self.deadline:
+        if not text.strip() or (began > self.deadline and not (during_reply and self.interaction)):
             if text.strip():
                 self._observe_background(text)
             return SpeechDecision(

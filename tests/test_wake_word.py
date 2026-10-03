@@ -920,3 +920,101 @@ def test_raw_ambient_transcript_logging_requires_opt_in(caplog, show_transcripts
         loop._process_worker()
     exposed = "STT candidate (diagnostic): 'background conversation'" in caplog.text
     assert exposed is show_transcripts
+
+
+def test_headphone_speech_interrupts_playback_and_preserves_onset():
+    from unittest.mock import MagicMock
+
+    detector = MagicMock()
+    detector.process_frame.return_value = None
+    speaking = [True]
+    tts = MagicMock()
+    tts.is_speaking.side_effect = lambda: speaking[0]
+
+    def stop():
+        if speaking[0]:
+            speaking[0] = False
+            return {'remaining_text': 'Continue with the next step.'}
+        return None
+
+    tts.stop.side_effect = stop
+    loop = WakeListenerLoop(
+        MockAudioBackend(), detector=detector, tts=tts, ambient=True,
+        speech_detector=lambda frame: bool(np.any(frame)), barge_in_mode='speech',
+    )
+    loop._running = True
+    loop._start_recording()
+    cancel = loop._response_cancel
+    loop._state = ListenerState.PROCESSING
+    speech = np.full(1280, 0.01, dtype=np.float32)
+    loop._handle_frame(speech)
+    loop._handle_frame(speech)
+    tts.stop.assert_not_called()  # Ignore shorter bursts; require sustained voice.
+    loop._handle_frame(speech)
+    assert not speaking[0]
+    assert cancel.is_set()
+    assert loop.state == ListenerState.RECORDING
+    assert loop._last_wake_info['during_reply']
+    assert not loop._last_wake_info.get('wake_verified')  # Still judge whom speech addresses.
+    np.testing.assert_array_equal(loop.recorder.get_audio(), np.tile(speech, 3))
+
+
+def test_headphone_barge_in_ignores_non_speech_noise():
+    from unittest.mock import MagicMock
+
+    detector = MagicMock()
+    detector.process_frame.return_value = None
+    tts = MagicMock()
+    tts.is_speaking.return_value = True
+    loop = WakeListenerLoop(
+        MockAudioBackend(), detector=detector, tts=tts, ambient=True,
+        speech_detector=lambda _: False, barge_in_mode='speech',
+    )
+    loop._state = ListenerState.PROCESSING
+    for _ in range(10):
+        loop._handle_frame(np.full(1280, 0.1, dtype=np.float32))
+    tts.stop.assert_not_called()
+    assert loop.state == ListenerState.PROCESSING
+
+
+def test_speech_during_synthesis_stops_pending_output():
+    from unittest.mock import MagicMock
+
+    detector = MagicMock()
+    detector.process_frame.return_value = None
+    tts = MagicMock()
+    tts.is_speaking.return_value = False  # Audio synthesis has not reached playback yet.
+    loop = WakeListenerLoop(
+        MockAudioBackend(), detector=detector, tts=tts, ambient=True,
+        monitor_resumed_speech=True, speech_detector=lambda _: True,
+    )
+    loop._start_recording()
+    cancel = loop._response_cancel
+    loop._state = ListenerState.PROCESSING
+    for _ in range(2):
+        loop._handle_frame(np.full(1280, 0.1, dtype=np.float32))
+    assert cancel.is_set()
+    tts.stop.assert_called_once()
+    assert loop.state == ListenerState.RECORDING
+
+
+def test_superseded_queued_speech_is_observed_without_being_executed():
+    observations, replies = [], []
+    loop = WakeListenerLoop(
+        MockAudioBackend(), detector=WakeWordDetector(enable_whisper_spotter=False),
+        on_transcription=lambda *args: replies.append(args),
+        on_transcript_observed=lambda text, info: observations.append((text, info)),
+    )
+    loop._running = True
+    loop._start_recording()
+
+    def transcribe(*_args, **_kwargs):
+        loop._stop_event.set()
+        return {'text': 'Raphael, explain ambient mode.', 'confidence': 0.8}
+
+    loop.stt = SimpleNamespace(transcribe_detailed=transcribe)
+    loop._processing_queue.put((np.ones(16000), {}, 0))
+    loop._process_worker()
+    assert observations[0][0] == 'Raphael, explain ambient mode.'
+    assert observations[0][1]['superseded']
+    assert not replies

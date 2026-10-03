@@ -57,6 +57,9 @@ class WakeListenerLoop:
         monitor_resumed_speech: bool = False,
         on_transcript_observed: Callable[[str, dict[str, Any]], None] | None = None,
         show_transcripts: bool = False,
+        barge_in_mode: str = "wake",
+        barge_in_speech_seconds: float = 0.24,
+        on_interruption: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.backend = audio_backend
         self.detector = detector or WakeWordDetector()
@@ -73,6 +76,12 @@ class WakeListenerLoop:
         self.monitor_resumed_speech = monitor_resumed_speech
         self.on_transcript_observed = on_transcript_observed
         self.show_transcripts = show_transcripts
+        if barge_in_mode not in {"speech", "wake"}:
+            raise ValueError("Barge-in mode must be 'speech' or 'wake'")
+        self.barge_in_mode = barge_in_mode
+        self.barge_in_speech_seconds = barge_in_speech_seconds
+        self.on_interruption = on_interruption
+        self._interrupt_speech_samples = 0
         self._speech_streak = 0
         self._response_cancel: threading.Event | None = None
         self._state = ListenerState.IDLE
@@ -146,10 +155,18 @@ class WakeListenerLoop:
     def _start_recording(self) -> None:
         if self._response_cancel is not None:
             self._response_cancel.set()
+            # Also invalidate TTS still synthesizing: is_speaking() is false then.
+            self._stop_output()
         self._response_cancel = threading.Event()
         self._recording_generation += 1
         self.recorder.start()
         self._set_state(ListenerState.RECORDING)
+
+    def _stop_output(self) -> None:
+        if self.tts:
+            info = self.tts.stop()
+            if isinstance(info, dict):
+                self._notify(self.on_interruption, info)
 
     def set_ambient(self, enabled: bool) -> None:
         """Switch capture mode; background speech is never treated as a wake trigger."""
@@ -177,12 +194,18 @@ class WakeListenerLoop:
             # A late keyword result from the previous utterance cannot authorize
             # this new one. Re-seed the detector with this recording's onset only.
             self.detector.reset(set_cooldown=False)
-        if self.tts and self.tts.is_speaking():
-            self.tts.stop()
+        speaking = bool(self.tts and self.tts.is_speaking())
+        during_reply = speaking or bool(
+            resumed and self._response_cancel is not None and not self._response_cancel.is_set()
+        )
+        if speaking:
+            self._stop_output()
         self._last_wake_info = {
             "ambient": self.ambient,
             "resumed_speech": True,
             "speech_started_at": time.monotonic(),
+            "during_reply": during_reply,
+            "response_pending": resumed,
         }
         self._start_recording()
         for frame in recent:
@@ -252,14 +275,32 @@ class WakeListenerLoop:
             and self._state != ListenerState.RECORDING
         ):
             trigger = self.detector.process_frame(audio)
+            speech_interrupt = False
+            if self.barge_in_mode == "speech" and self._speech_detector is not None:
+                speech = self._speech_detector(audio)
+                self._interrupt_speech_samples = (
+                    self._interrupt_speech_samples + audio.size if speech else 0
+                )
+                speech_interrupt = (
+                    self._interrupt_speech_samples >=
+                    round(self.sample_rate * self.barge_in_speech_seconds)
+                )
             loud_interrupt = (
                 not self.ambient
+                and self.barge_in_mode == "wake"
                 and VoiceRecorder.calculate_rms(audio) >= self.barge_in_threshold_rms
             )
+            if speech_interrupt and not trigger:
+                self._start_speech_recording()
+                self._notify(self.on_barge_in)
+                self._interrupt_speech_samples = 0
+                return
             if loud_interrupt or trigger:
-                self.tts.stop()
+                self._stop_output()
                 self._last_wake_info = dict(trigger) if trigger else {}
                 self._last_wake_info["ambient"] = self.ambient
+                self._last_wake_info["during_reply"] = True
+                self._last_wake_info["speech_started_at"] = time.monotonic()
                 if trigger and self.ambient:
                     self._last_wake_info["wake_verified"] = True
                 self._start_recording()
@@ -269,9 +310,10 @@ class WakeListenerLoop:
                     self.recorder.add_frame(audio)
                 self._notify(self.on_barge_in)
                 return
-            # Never run ambient/resumed-speech VAD on our own loudspeaker output.
-            # Wake mode retains its loud barge-in; ambient uses a direct wake phrase.
+            # With speakers select wake mode so loudspeaker speech isn't treated
+            # as a user interruption. Speech mode is intended for headphones.
             return
+        self._interrupt_speech_samples = 0
         if self.ambient and self._state == ListenerState.LISTENING_WAKE:
             trigger = self.detector.process_frame(audio)
             if trigger:
@@ -343,8 +385,7 @@ class WakeListenerLoop:
                 if not self._running:
                     continue
                 if generation != self._recording_generation:
-                    logger.info("Skipped queued speech superseded by a newer recording.")
-                    continue
+                    logger.info("Decoding superseded speech for temporary conversation context.")
                 text = ""
                 has_command_audio = not (
                     info.get("wake_prefix_trimmed") and not info.get("post_wake_speech", True)
@@ -429,7 +470,9 @@ class WakeListenerLoop:
         self._recent_audio.clear()
         self.dropped_frames = 0
         self._stop_event = threading.Event()
-        if (self.ambient or self.monitor_resumed_speech) and self._speech_detector is None:
+        if (
+            self.ambient or self.monitor_resumed_speech or self.barge_in_mode == "speech"
+        ) and self._speech_detector is None:
             if self.sample_rate != 16000:
                 raise ValueError("Ambient speech detection requires 16000 Hz audio")
             from raphael.audio.activity import SpeechActivity

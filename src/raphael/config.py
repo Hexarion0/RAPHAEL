@@ -1,6 +1,7 @@
 """Centralized configuration and secrets management for RAPHAEL."""
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -93,6 +94,9 @@ class AudioConfig(BaseModel):
     wake_min_rms: float = Field(default=0.006, gt=0.0, le=0.05)
     wake_window_seconds: float = Field(default=3.0, ge=1.5, le=5.0)
     ambient_listening: bool = Field(default=False)
+    show_transcripts: bool = Field(default=False)
+    barge_in_mode: Literal["speech", "wake"] = Field(default="wake")
+    barge_in_speech_seconds: float = Field(default=0.24, ge=0.16, le=1.0)
     ambient_followup_seconds: float = Field(default=20.0, ge=2, le=120)
     wake_models: list[str] = Field(
         default_factory=list,
@@ -219,6 +223,9 @@ class Settings(BaseSettings):
     wake_min_rms: float = Field(default=0.006, gt=0.0, le=0.05)
     wake_window_seconds: float = Field(default=3.0, ge=1.5, le=5.0)
     ambient_listening: bool = Field(default=False)
+    show_transcripts: bool = Field(default=False)
+    barge_in_mode: Literal["speech", "wake"] = Field(default="wake")
+    barge_in_speech_seconds: float = Field(default=0.24, ge=0.16, le=1.0)
     ambient_followup_seconds: float = Field(default=20.0, ge=2, le=120)
     stt_model: str = Field(default="base.en")
     stt_device: str = Field(default="cpu")
@@ -299,6 +306,9 @@ class Settings(BaseSettings):
             wake_min_rms=self.wake_min_rms,
             wake_window_seconds=self.wake_window_seconds,
             ambient_listening=self.ambient_listening,
+            show_transcripts=self.show_transcripts,
+            barge_in_mode=self.barge_in_mode,
+            barge_in_speech_seconds=self.barge_in_speech_seconds,
             ambient_followup_seconds=self.ambient_followup_seconds,
             stt_model=self.stt_model,
             stt_device=self.stt_device,

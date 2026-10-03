@@ -103,3 +103,23 @@ def test_ambient_and_pause_settings_reach_audio_config():
     assert settings.audio.ambient_listening
     assert settings.audio.ambient_followup_seconds == 30
     assert settings.audio.utterance_pause_grace_seconds == 1.2
+
+
+def test_listening_defaults_can_be_selected_in_env(tmp_path):
+    env_file = tmp_path / '.env'
+    env_file.write_text(
+        'AMBIENT_LISTENING=true\nSHOW_TRANSCRIPTS=true\n'
+        'BARGE_IN_MODE=speech\nBARGE_IN_SPEECH_SECONDS=0.32\n'
+    )
+    with patch.dict(os.environ, {}, clear=True):
+        audio = Settings(_env_file=env_file).audio
+    assert audio.ambient_listening and audio.show_transcripts
+    assert audio.barge_in_mode == 'speech'
+    assert audio.barge_in_speech_seconds == 0.32
+
+
+def test_invalid_barge_in_mode_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, barge_in_mode='anything')

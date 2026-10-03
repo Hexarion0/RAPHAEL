@@ -59,6 +59,14 @@ and private audio out of reports.
    she stays quiet and no background turn or personal fact appears in SQLite.
    Check that `Raphael, stop listening` returns to wake-word mode and `Hey Raphael,
    listen continuously` enables ambient mode again. Interrupt playback by name.
+   With headphones, also set `BARGE_IN_MODE=speech` and interrupt with ordinary
+   speech. Confirm audio stops, the first word is retained, and steady PC hum does
+   not interrupt. Pause a long reply, then say `Raphael, continue`; verify the AI
+   receives interruption context and resumes instead of starting over. Estimated
+   progress may repeat or skip a few words; it is not exact word alignment.
+   Add words while STT or routing is pending and confirm one combined response.
+   Check `AMBIENT_LISTENING` and `SHOW_TRANSCRIPTS` defaults with a no-argument GPU
+   launch, then test `--no-ambient --no-show-transcripts` overrides.
 9. Pause for 1.2 seconds mid-sentence, then finish the thought; expect one complete
    turn. Resume speaking during reply generation and verify the old reply is
    suppressed. Check small wording mistakes against recent context; uncertain

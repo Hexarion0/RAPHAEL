@@ -10,6 +10,37 @@ import pytest
 SOURCE = str(Path(__file__).resolve().parents[1] / "src")
 
 
+@pytest.mark.parametrize('arguments, enabled', [([], True), (
+    ['--no-ambient', '--no-show-transcripts'], False,
+)])
+def test_env_listening_defaults_and_cli_overrides(tmp_path, monkeypatch, arguments, enabled):
+    from raphael import __main__, audio, config, platform, providers
+
+    settings = config.Settings(
+        _env_file=None, memory_db_path=str(tmp_path / 'memory.db'),
+        ambient_listening=True, show_transcripts=True, barge_in_mode='speech',
+    )
+    monkeypatch.setattr(config, 'get_settings', lambda: settings)
+    monkeypatch.setattr(platform, 'get_audio_backend', MagicMock())
+    monkeypatch.setattr(providers, 'get_model_router', MagicMock())
+    for component in ('WakeWordDetector', 'SpeechToText', 'VoiceRecorder', 'TextToSpeech'):
+        monkeypatch.setattr(audio, component, MagicMock())
+    constructor = MagicMock(return_value=SimpleNamespace(
+        is_running=True, start=lambda: None, stop=lambda: None,
+    ))
+    monkeypatch.setattr(audio, 'WakeListenerLoop', constructor)
+
+    def interrupt(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(__main__.time, 'sleep', interrupt)
+    monkeypatch.setattr(sys, 'argv', ['raphael', *arguments])
+    assert __main__.main() == 0
+    assert constructor.call_args.kwargs['ambient'] is enabled
+    assert constructor.call_args.kwargs['show_transcripts'] is enabled
+    assert constructor.call_args.kwargs['barge_in_mode'] == 'speech'
+
+
 @pytest.mark.parametrize(
     "text, wake_info, expected_reply",
     [

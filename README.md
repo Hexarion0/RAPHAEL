@@ -184,8 +184,9 @@ Whisper keyword spotter. Wait for the `Wake keyword spotter ready` log on startu
 being transcribed, STT word count/confidence, quality retries, superseded speech,
 and each ambient reply/silence reason. DEBUG logs include raw candidates, including
 background speech. For a single diagnostic run, add `--show-transcripts` to show
-the recognized words at INFO level, including rejected ambient speech. Neither
-option is needed for normal listening. Recognizable but low-confidence
+the recognized words at INFO level, including rejected ambient speech. Set
+`SHOW_TRANSCRIPTS=true` in `.env` to make this the default, or override it for a run
+with `--no-show-transcripts`. Recognizable but low-confidence
 direct speech can prompt a repeat without executing or saving the uncertain text.
 Bare wake phrases meeting the acceptance threshold skip the larger quality retry.
 `STT_BEAM_SIZE=3` reduces decoding work; raise it if recognition accuracy needs
@@ -195,8 +196,10 @@ increase the grace if you pause longer mid-sentence. Recording uses local VAD
 instead of relying only on volume, so quiet speech and louder steady noise can
 be distinguished. Speech resumed during STT or
 reply generation invalidates the old response, retains the new speech onset, and
-suppresses stale playback/history. An in-flight provider request can still finish
-before the next queued utterance is processed. Summaries run separately
+suppresses stale playback/history. Addressed speech superseded during STT is kept
+temporarily and included with the next utterance so additions do not lose the
+original request. An in-flight provider request can still finish before the next
+queued utterance is processed; its canceled reply is discarded. Summaries run separately
 from voice replies, wait for at least six new older messages, process bounded
 batches, and resume across restarts. Context keeps a bounded tail of messages
 awaiting a summary so batching does not immediately lose the preceding exchange.
@@ -204,9 +207,12 @@ Clearing a conversation also removes its summaries. Sign-off commands such as `g
 questions that merely contain farewell words do not.
 
 Start optional ambient listening with `./scripts/launch_raphael_gpu.sh --ambient`,
-or set `AMBIENT_LISTENING=true` and launch with `--listen`. Local Silero VAD captures
+or set `AMBIENT_LISTENING=true` in `.env`. With no arguments the GPU launcher starts
+listening using `.env` settings, so `./scripts/launch_raphael_gpu.sh` is sufficient.
+`--no-ambient` selects wake-word mode for one run. Local Silero VAD captures
 speech without a wake phrase at 16 kHz. Direct addresses are handled locally;
-possible follow-ups within `AMBIENT_FOLLOWUP_SECONDS=20` use an economical
+possible follow-ups within `AMBIENT_FOLLOWUP_SECONDS` (40 in the example `.env`)
+use an economical
 `speech_gate` request before a reply. Unclear intent, malformed judgments, provider
 failure, and ordinary background conversation default to silence. This estimates
 the intended listener from text and context; it does not identify speakers.
@@ -219,13 +225,24 @@ fillers such as "so" or "well". A name
 at the end of a question does not trim away the preceding question. Keyword evidence
 belongs to one utterance and does not restart its recording or authorize the next
 background conversation. If new speech supersedes an in-flight STT result, a clear
-direct address from that result can still enter temporary context; its old command
-is not executed, spoken, or saved as a conversation turn.
+direct address from that result can still enter temporary context. Its canceled
+reply is not executed or spoken; the original user fragment enters history only
+when a subsequent addressed utterance is handled.
 
 Say `Raphael, stop listening` to return to wake-word mode, or `Hey Raphael, listen
 continuously` to turn ambient capture back on. This switches modes rather than
-closing the microphone. Say RAPHAEL's name to interrupt playback in ambient mode;
-continuous transcription pauses during her speech to reduce speaker echo.
+closing the microphone. With headphones, set `BARGE_IN_MODE=speech`: local VAD
+stops playback after `BARGE_IN_SPEECH_SECONDS=0.24` of sustained speech and records
+the interruption with onset pre-roll. Saying her name still works. With speakers,
+select `BARGE_IN_MODE=wake` to avoid treating RAPHAEL's loudspeaker output as your
+voice. Speech mode does not provide acoustic echo cancellation or identify speakers.
+
+The follow-up window starts after playback finishes. Interruptions during a long
+reply can still be judged as follow-ups even if that window would otherwise have
+expired. A canceled synthesis cannot play later. The next AI reply receives the
+previous reply's text and estimated playback progress; asking `continue` can resume
+the unfinished explanation. The resume point is estimated from elapsed audio time,
+not exact word timestamps.
 
 Up to six short background excerpts are held in RAM for temporary context and
 expire after 90 seconds. Raw background turns are not written to chat or saved
