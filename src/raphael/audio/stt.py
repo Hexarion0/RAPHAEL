@@ -1,5 +1,6 @@
 """Speech-to-text conversion engine using faster-whisper with VAD and anti-hallucination."""
 
+import gc
 import math
 import re
 import threading
@@ -79,6 +80,7 @@ class SpeechToText:
         self.retry_model_size = retry_model or None
         self.wake_phrase = wake_phrase
         self._retry_model: WhisperModel | None = None
+        self._retry_blocked_devices: set[str] = set()
 
         self.model: WhisperModel | None = None
         self._ready = threading.Event()
@@ -314,6 +316,7 @@ class SpeechToText:
             result = decode(decode_kwargs)
         except Exception as err:
             logger.warning("Whisper transcription failed (%s). Retrying on CPU/int8.", err)
+            self._retry_model = None  # A cached CUDA retry must not follow the CPU fallback.
             self.model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
             self.device = "cpu"
             self.compute_type = "int8"
@@ -328,8 +331,10 @@ class SpeechToText:
             and result["confidence"] >= self.min_confidence
             and not strip_wake_phrase(result["text"], self.wake_phrase)
         )
-        if not clear_greeting and result["suspected_speech"] and result["confidence"] < max(
-            self.min_confidence, self.retry_confidence
+        if (
+            self.device not in self._retry_blocked_devices
+            and not clear_greeting and result["suspected_speech"]
+            and result["confidence"] < max(self.min_confidence, self.retry_confidence)
         ):
             # Spend extra decoding work only on ambiguous short utterances.
             if duration <= 12.0:
@@ -358,6 +363,16 @@ class SpeechToText:
                         result = candidate
                 except Exception as err:
                     logger.warning("STT quality retry failed: %s", err)
+                    if "out of memory" in str(err).casefold():
+                        self._retry_model = None
+                        self._retry_blocked_devices.add(self.device)
+                        logger.warning(
+                            "Disabled STT quality retries on %s after memory exhaustion; "
+                            "keeping primary transcription.", self.device,
+                        )
+                if self.device in self._retry_blocked_devices:
+                    # The exception traceback has now been released as well.
+                    gc.collect()
         result["needs_repeat"] = (
             result.pop("suspected_speech") and result["confidence"] < self.min_confidence
         )

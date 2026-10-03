@@ -259,10 +259,156 @@ def test_superseded_request_and_added_words_reach_one_response(tmp_path, monkeyp
     try:
         messages = router.send.call_args.args[0]
         users = [message.content for message in messages if message.role == 'user']
-        assert users == ['explain always listening.', 'And include headphone support.']
+        assert users == ['explain always listening.\nAnd include headphone support.']
         assert 'same request' in messages[0].content
         tts.speak.assert_called_once()
         assert [turn.role for turn in turns] == ['user', 'user', 'assistant']
+    finally:
+        store.close()
+
+
+def test_live_canceled_request_and_short_addition_are_merged(tmp_path, monkeypatch):
+    canceled, replacement = Event(), Event()
+    router = MagicMock()
+
+    def respond(messages, **kwargs):
+        assert kwargs.get('purpose', 'conversation') == 'conversation'
+        if router.send.call_count == 1:
+            canceled.set()  # Speech resumed while the first route was in flight.
+            return LLMResponse('Discard this stale response.', 'test', 'test')
+        return LLMResponse('Here is what I am good at.', 'test', 'test')
+
+    router.send.side_effect = respond
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [
+            ('Hey Raphael, what is it that you are special?', {'cancel_event': canceled}),
+            ('And good.', {
+                'cancel_event': replacement, 'supersedes_cancel_event': canceled,
+                'response_pending': True, 'during_reply': True, 'stt_confidence': 0.54,
+            }),
+        ], router=router,
+    )
+    try:
+        assert router.send.call_count == 2
+        user_messages = [
+            message.content for message in router.send.call_args.args[0] if message.role == 'user'
+        ]
+        assert user_messages == ['what is it that you are special?\nAnd good.']
+        assert [turn.content for turn in turns if turn.role == 'user'] == [
+            'what is it that you are special?', 'And good.',
+        ]
+        assert [turn.content for turn in turns if turn.role == 'assistant'] == [
+            'Here is what I am good at.'
+        ]
+        tts.speak.assert_called_once_with('Here is what I am good at.', block=True)
+    finally:
+        store.close()
+
+
+def test_linked_superseded_stt_request_is_merged_before_reply_gate(tmp_path, monkeypatch):
+    canceled, replacement = Event(), Event()
+    canceled.set()
+    router = MagicMock()
+    router.send.return_value = LLMResponse('Together, this is the full answer.', 'test', 'test')
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [('Also with headphones.', {
+            'cancel_event': replacement, 'supersedes_cancel_event': canceled,
+            'response_pending': True,
+        })],
+        router=router,
+        observed=[('Raphael, explain always listening.', {
+            'superseded': True, 'cancel_event': canceled,
+        })],
+    )
+    try:
+        router.send.assert_called_once()
+        assert router.send.call_args.args[0][-1].content == (
+            'explain always listening.\nAlso with headphones.'
+        )
+        assert [turn.role for turn in turns] == ['user', 'user', 'assistant']
+        tts.speak.assert_called_once()
+    finally:
+        store.close()
+
+
+def test_repeated_additions_keep_the_original_request(tmp_path, monkeypatch):
+    first, second, third = Event(), Event(), Event()
+    router = MagicMock()
+
+    def respond(_messages, **kwargs):
+        assert kwargs.get('purpose', 'conversation') == 'conversation'
+        if router.send.call_count == 1:
+            first.set()
+        elif router.send.call_count == 2:
+            second.set()
+        return LLMResponse('Here is the combined answer.', 'test', 'test')
+
+    router.send.side_effect = respond
+    _router, tts, _loop, store, _turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [('Raphael, explain this in five steps.', {'cancel_event': first}),
+         ('And include examples.', {'cancel_event': second, 'supersedes_cancel_event': first}),
+         ('No, three steps, not five.', {
+             'cancel_event': third, 'supersedes_cancel_event': second,
+         })], router=router,
+    )
+    try:
+        assert router.send.call_count == 3
+        users = [
+            message.content for message in router.send.call_args.args[0] if message.role == 'user'
+        ]
+        assert users == [
+            'explain this in five steps.\nAnd include examples.\nNo, three steps, not five.'
+        ]
+        tts.speak.assert_called_once()
+    finally:
+        store.close()
+
+
+def test_unrelated_recording_cannot_inherit_canceled_request(tmp_path, monkeypatch):
+    canceled, other_token = Event(), Event()
+    router = MagicMock()
+
+    def respond(_messages, **kwargs):
+        if kwargs.get('purpose') == 'speech_gate':
+            return LLMResponse('{"addressed": false, "confidence": 0.95}', 'test', 'test')
+        canceled.set()
+        return LLMResponse('Discard this.', 'test', 'test')
+
+    router.send.side_effect = respond
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [('Raphael, explain this.', {'cancel_event': canceled}), ('And good.', {
+            'supersedes_cancel_event': other_token, 'response_pending': True,
+        })], router=router,
+    )
+    try:
+        assert router.send.call_args.kwargs['purpose'] == 'speech_gate'
+        assert [turn.role for turn in turns] == ['user']
+        tts.speak.assert_not_called()
+    finally:
+        store.close()
+
+
+def test_merge_permission_does_not_override_other_listener_or_save_facts(tmp_path, monkeypatch):
+    canceled = Event()
+    canceled.set()
+    router = MagicMock()
+    router.send.return_value = LLMResponse('I can take that into account.', 'test', 'test')
+    _router, tts, _loop, store, _turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [('Actually, Mom, pass me that.', {'supersedes_cancel_event': canceled}),
+         ('Actually my favorite game is CS2.', {'supersedes_cancel_event': canceled})],
+        router=router, observed=[('Raphael, explain this.', {
+            'superseded': True, 'cancel_event': canceled,
+        })],
+    )
+    try:
+        assert store.get_fact('user:favorite_game') is None
+        tts.speak.assert_called_once()
+        router.send.assert_called_once()
     finally:
         store.close()
 

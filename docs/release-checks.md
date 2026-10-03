@@ -65,6 +65,10 @@ and private audio out of reports.
    receives interruption context and resumes instead of starting over. Estimated
    progress may repeat or skip a few words; it is not exact word alignment.
    Add words while STT or routing is pending and confirm one combined response.
+   In particular, ask a question by name and add `And good` while routing is
+   pending: expect `merged_continuation` and a single combined request. Repeat
+   with successive additions and a correction; verify the original question and
+   negation survive. Speech addressed to `Mom` must still be rejected.
    Check `AMBIENT_LISTENING` and `SHOW_TRANSCRIPTS` defaults with a no-argument GPU
    launch, then test `--no-ambient --no-show-transcripts` overrides.
 9. Pause for 1.2 seconds mid-sentence, then finish the thought; expect one complete

@@ -191,6 +191,47 @@ def test_failed_larger_retry_still_requests_repeat(model_without_downloads, monk
     assert result["raw_text"] == "Unclear command"
 
 
+@pytest.mark.parametrize('fails_during_load', [False, True])
+def test_retry_oom_is_not_repeated_and_releases_cached_model(
+    model_without_downloads, monkeypatch, fails_during_load
+):
+    model_without_downloads.transcribe.return_value = decoding('And good.', -0.62)
+    larger = MagicMock()
+    larger.transcribe.side_effect = RuntimeError('CUDA failed with error out of memory')
+    factory = MagicMock(
+        side_effect=RuntimeError('CUDA failed with error out of memory')
+    ) if fails_during_load else MagicMock(return_value=larger)
+    monkeypatch.setattr('raphael.audio.stt.WhisperModel', factory)
+    stt = SpeechToText(device='cuda', compute_type='int8_float16', retry_model='medium.en')
+    audio = np.ones(16000, dtype=np.float32) * 0.1
+    first = stt.transcribe_detailed(audio)
+    second = stt.transcribe_detailed(audio)
+    assert first['text'] == second['text'] == 'And good.'
+    assert first['retried'] and not second['retried']
+    assert not first['needs_repeat']
+    assert stt.device == 'cuda'
+    assert stt._retry_model is None
+    factory.assert_called_once()
+    assert larger.transcribe.call_count == (0 if fails_during_load else 1)
+
+
+def test_cpu_fallback_does_not_reuse_a_cached_cuda_retry(model_without_downloads, monkeypatch):
+    model_without_downloads.transcribe.side_effect = RuntimeError('CUDA out of memory')
+    cpu_primary, cpu_retry, cached_cuda = MagicMock(), MagicMock(), MagicMock()
+    cpu_primary.transcribe.return_value = decoding('And good.', -0.62)
+    cpu_retry.transcribe.return_value = decoding('And good.', -0.1)
+    factory = MagicMock(side_effect=[cpu_primary, cpu_retry])
+    monkeypatch.setattr('raphael.audio.stt.WhisperModel', factory)
+    stt = SpeechToText(model_size='small.en', device='cuda', retry_model='medium.en')
+    stt._retry_model = cached_cuda
+    result = stt.transcribe_detailed(np.ones(16000, dtype=np.float32) * 0.1)
+    assert result['text'] == 'And good.' and not result['needs_repeat']
+    assert stt.device == 'cpu'
+    assert [call.args[0] for call in factory.call_args_list] == ['small.en', 'medium.en']
+    assert all(call.kwargs['device'] == 'cpu' for call in factory.call_args_list)
+    cached_cuda.transcribe.assert_not_called()
+
+
 def test_repetition_hallucination_requests_repeat(model_without_downloads):
     result = decoding('la ' * 40, -0.1)
     result[0][0].compression_ratio = 5.0

@@ -955,6 +955,7 @@ def test_headphone_speech_interrupts_playback_and_preserves_onset():
     assert cancel.is_set()
     assert loop.state == ListenerState.RECORDING
     assert loop._last_wake_info['during_reply']
+    assert loop._last_wake_info['supersedes_cancel_event'] is cancel
     assert not loop._last_wake_info.get('wake_verified')  # Still judge whom speech addresses.
     np.testing.assert_array_equal(loop.recorder.get_audio(), np.tile(speech, 3))
 

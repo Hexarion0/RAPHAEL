@@ -189,6 +189,9 @@ the recognized words at INFO level, including rejected ambient speech. Set
 with `--no-show-transcripts`. Recognizable but low-confidence
 direct speech can prompt a repeat without executing or saving the uncertain text.
 Bare wake phrases meeting the acceptance threshold skip the larger quality retry.
+If a quality retry runs out of memory, its cached model is released and further
+quality retries on that device are disabled for this process. Primary transcription
+continues. A CPU fallback discards any cached GPU retry model.
 `STT_BEAM_SIZE=3` reduces decoding work; raise it if recognition accuracy needs
 more search. `UTTERANCE_SILENCE_SECONDS=1.0` plus
 `UTTERANCE_PAUSE_GRACE_SECONDS=0.8` gives 1.8 seconds before an utterance finishes;
@@ -199,7 +202,14 @@ reply generation invalidates the old response, retains the new speech onset, and
 suppresses stale playback/history. Addressed speech superseded during STT is kept
 temporarily and included with the next utterance so additions do not lose the
 original request. An in-flight provider request can still finish before the next
-queued utterance is processed; its canceled reply is discarded. Summaries run separately
+queued utterance is processed; its canceled reply is discarded. Linked additions
+such as `and ...`, `also ...`, and `no, I meant ...` inherit reply permission from
+the exact unfinished request they canceled. Pending fragments are sent as one user
+message, while their original wording remains separate in chat history. Unrelated
+recordings do not inherit this permission, and inherited permission does not
+automatically authorize saving personal facts.
+
+Summaries run separately
 from voice replies, wait for at least six new older messages, process bounded
 batches, and resume across restarts. Context keeps a bounded tail of messages
 awaiting a summary so batching does not immediately lose the preceding exchange.

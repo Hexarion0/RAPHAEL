@@ -154,6 +154,7 @@ class WakeListenerLoop:
 
     def _start_recording(self) -> None:
         if self._response_cancel is not None:
+            self._last_wake_info["supersedes_cancel_event"] = self._response_cancel
             self._response_cancel.set()
             # Also invalidate TTS still synthesizing: is_speaking() is false then.
             self._stop_output()

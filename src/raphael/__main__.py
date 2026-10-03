@@ -246,6 +246,7 @@ def main() -> int:
             settings.audio.wake_word, settings.audio.ambient_followup_seconds
         )
         pending_speech: list[str] = []
+        unfinished_request: list[dict] = [{}]
         interrupted_reply: list[dict] = [{}]
 
         memory_store = MemoryStore(db_path=settings.memory.db_path)
@@ -286,6 +287,17 @@ def main() -> int:
                 return False
             return tts.speak(text, block=block)
 
+        def linked_fragments(info: dict) -> list[str]:
+            """Recover a request only when this recording canceled that exact request."""
+            previous = unfinished_request[0]
+            event = previous.get("cancel_event")
+            if (
+                event is not None and event is info.get("supersedes_cancel_event")
+                and event.is_set() and time.monotonic() - previous["started_at"] <= 120
+            ):
+                return previous["fragments"][:]
+            return []
+
         def on_transcription(text: str, wake_info: dict, audio_data) -> bool:
             cancel_event = wake_info.get("cancel_event")
 
@@ -309,6 +321,7 @@ def main() -> int:
                 return False
             user_text = text.strip()
             raw = wake_info.get("stt_raw_text", user_text)
+            earlier_fragments = linked_fragments(wake_info)
             decision = None
             if ambient_enabled[0]:
                 decision = ambient_context.decide(
@@ -323,6 +336,7 @@ def main() -> int:
                     started_at=wake_info.get("speech_started_at"),
                     verified_wake=bool(wake_info.get("wake_verified")),
                     during_reply=bool(wake_info.get("during_reply")),
+                    unfinished_request=earlier_fragments,
                 )
                 logger.info(
                     "Ambient decision: %s (%s).",
@@ -355,6 +369,7 @@ def main() -> int:
             )
             if mode_off or mode_on:
                 pending_speech.clear()
+                unfinished_request[0] = {}
                 enabled = bool(mode_on)
                 loop.set_ambient(enabled)
                 ambient_enabled[0] = enabled
@@ -383,6 +398,7 @@ def main() -> int:
             # Check if user requested immediate stop / cancel
             if _stop_re.search(cleaned_query):
                 pending_speech.clear()
+                unfinished_request[0] = {}
                 logger.info("🛑 Stop requested ('%s') — returning to standby.", cleaned_query)
                 say("Got it, quiet now.")
                 ambient_context.deadline = 0.0
@@ -406,6 +422,7 @@ def main() -> int:
             # Check for farewell in the user's query before calling the AI
             if is_farewell(cleaned_query):
                 pending_speech.clear()
+                unfinished_request[0] = {}
                 logger.info("👋 Farewell detected in user query — ending session.")
                 farewell_reply = "Talk to you soon, take care!"
                 logger.info('🤖 RAPHAEL: "%s"', farewell_reply)
@@ -415,24 +432,32 @@ def main() -> int:
                 return False
 
             # Record user turn in persistent SQLite session
+            combined_fragments = (earlier_fragments + [cleaned_query])[-5:]
+            request = {
+                "cancel_event": cancel_event, "fragments": combined_fragments,
+                "started_at": time.monotonic(),
+            }
+            unfinished_request[0] = request
             added_speech = pending_speech[:]
             pending_speech.clear()
             for fragment in added_speech:
                 conv_manager.add_turn(role="user", content=fragment)
             conv_manager.add_turn(role="user", content=cleaned_query)
             local_reply = answer_clock_query(cleaned_query)
-            if local_reply is not None:
+            if local_reply is not None and not earlier_fragments and not added_speech:
                 conv_manager.add_turn(
                     role="assistant", content=local_reply, provider="local", model="clock",
                 )
                 logger.info('🤖 RAPHAEL: "%s" [local/clock]', local_reply)
                 say(local_reply)
+                if current() and unfinished_request[0] is request:
+                    unfinished_request[0] = {}
                 _in_followup[0] = True
                 return True
 
             # Build sliding context window messages with system persona & recalled memories
             system_prompt = build_system_prompt(cleaned_query)
-            if added_speech or wake_info.get("response_pending"):
+            if earlier_fragments or added_speech or wake_info.get("response_pending"):
                 system_prompt += (
                     "\nThe user added speech before a response could finish. The preceding "
                     "user fragments and latest message belong to the same request. Answer "
@@ -472,6 +497,21 @@ def main() -> int:
                 "The original transcript stays the record. Never claim a guess was saved."
             )
             context_messages = conv_manager.get_active_messages(system_prompt=system_prompt)
+            if earlier_fragments or added_speech:
+                # Keep each original transcript in SQLite, but present this pending
+                # request as one user message to the model. Remove matching tail
+                # fragments to avoid sending the same request twice.
+                parts = combined_fragments if earlier_fragments else added_speech + [cleaned_query]
+                for fragment in reversed(parts):
+                    if (
+                        context_messages[-1].role == "user"
+                        and context_messages[-1].content == fragment
+                    ):
+                        context_messages.pop()
+                    else:
+                        break
+                context_messages.append(ChatMessage("user", "\n".join(parts)))
+                logger.info("Merged %d spoken fragments into one pending request.", len(parts))
 
             try:
                 response = router.send(context_messages, temperature=0.7, max_tokens=400)
@@ -502,6 +542,8 @@ def main() -> int:
                 said = say(reply_text)
                 if said and current() and interrupted_reply[0] is playback_context:
                     interrupted_reply[0] = {}
+                if said and current() and unfinished_request[0] is request:
+                    unfinished_request[0] = {}
 
                 # Stay in follow-up conversation mode
                 _in_followup[0] = True
@@ -532,12 +574,18 @@ def main() -> int:
                     text, router, [], started_at=info.get("speech_started_at"),
                     verified_wake=bool(info.get("wake_verified")),
                     during_reply=bool(info.get("during_reply")),
+                    unfinished_request=linked_fragments(info),
                 )
                 if not decision.addressed:
                     return
                 ambient_context.record_addressed("user", text)
             fragment = strip_wake_phrase(text, settings.audio.wake_word)
             if fragment:
+                parts = linked_fragments(info) + [fragment]
+                unfinished_request[0] = {
+                    "cancel_event": info.get("cancel_event"), "fragments": parts[-5:],
+                    "started_at": time.monotonic(),
+                }
                 pending_speech.append(fragment[:1000])
                 del pending_speech[:-4]
             logger.info("Retained superseded addressed speech as temporary conversation context.")
