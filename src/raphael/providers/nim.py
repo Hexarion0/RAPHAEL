@@ -185,6 +185,30 @@ class NimProvider(LLMProvider):
             raise ValueError("NIM reply content must be text or null")
         cleaned = text.strip()
 
+        def is_structured_reply(candidate: str) -> bool:
+            """Protect JSON string values from conversational cleanup heuristics."""
+            fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", candidate, re.I | re.S)
+            try:
+                parsed = json.loads(fenced.group(1) if fenced else candidate)
+            except (ValueError, TypeError):
+                return False
+            return isinstance(parsed, (dict, list))
+
+        # A machine-readable reply can mention 'Final answer:' or contain literal
+        # thinking tags in string values. Only remove exterior reasoning blocks
+        # before returning the complete JSON, optionally with its original fence.
+        structured = cleaned
+        while True:
+            if is_structured_reply(structured):
+                return structured
+            exterior = re.match(
+                r"^<(think|thought|reasoning|reflection)>[\s\S]*?</\1>",
+                structured, re.IGNORECASE,
+            )
+            if exterior is None:
+                break
+            structured = structured[exterior.end():].strip()
+
         # 1. Remove properly closed XML thinking tags
         cleaned = re.sub(
             r"<(think|thought|reasoning|reflection)>[\s\S]*?</\1>",

@@ -98,6 +98,7 @@ class AudioConfig(BaseModel):
     barge_in_mode: Literal["speech", "wake"] = Field(default="wake")
     barge_in_speech_seconds: float = Field(default=0.24, ge=0.16, le=1.0)
     ambient_followup_seconds: float = Field(default=20.0, ge=2, le=120)
+    ambient_followup_policy: Literal["conversation", "strict"] = Field(default="conversation")
     wake_models: list[str] = Field(
         default_factory=list,
         description="openWakeWord model names/paths (empty = Whisper-only keyword spotter)",
@@ -229,6 +230,7 @@ class Settings(BaseSettings):
     barge_in_mode: Literal["speech", "wake"] = Field(default="wake")
     barge_in_speech_seconds: float = Field(default=0.24, ge=0.16, le=1.0)
     ambient_followup_seconds: float = Field(default=20.0, ge=2, le=120)
+    ambient_followup_policy: Literal["conversation", "strict"] = Field(default="conversation")
     stt_model: str = Field(default="base.en")
     stt_device: str = Field(default="cpu")
     stt_compute_type: str = Field(default="int8")
@@ -314,6 +316,7 @@ class Settings(BaseSettings):
             barge_in_mode=self.barge_in_mode,
             barge_in_speech_seconds=self.barge_in_speech_seconds,
             ambient_followup_seconds=self.ambient_followup_seconds,
+            ambient_followup_policy=self.ambient_followup_policy,
             stt_model=self.stt_model,
             stt_device=self.stt_device,
             stt_compute_type=self.stt_compute_type,

@@ -246,7 +246,8 @@ def main() -> int:
             settings.audio.ambient_listening if args.ambient is None else args.ambient
         ]
         ambient_context = AmbientConversation(
-            settings.audio.wake_word, settings.audio.ambient_followup_seconds
+            settings.audio.wake_word, settings.audio.ambient_followup_seconds,
+            followup_policy=settings.audio.ambient_followup_policy,
         )
         pending_speech: list[str] = []
         unfinished_request: list[dict] = [{}]
@@ -359,8 +360,9 @@ def main() -> int:
                         unfinished_request=earlier_fragments,
                     )
                 logger.info(
-                    "Ambient decision: %s (%s).",
+                    "Ambient decision: %s (%s; intent_confidence=%s).",
                     "reply" if decision.addressed else "silent", decision.reason,
+                    f"{decision.confidence:.2f}" if decision.confidence is not None else "local",
                 )
                 if not current() or not decision.addressed:
                     return False
@@ -685,7 +687,8 @@ def main() -> int:
         loop.start()
         if ambient_enabled[0]:
             logger.info(
-                "Ambient listening active; replies require a direct address or clear follow-up."
+                "Ambient listening active; follow-up policy=%s, window=%.0fs.",
+                settings.audio.ambient_followup_policy, settings.audio.ambient_followup_seconds,
             )
         else:
             logger.info(

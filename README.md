@@ -2,7 +2,7 @@
 
 > A JARVIS-style, always-listening desktop AI assistant — its own voice, multi-provider AI routing, memory, and messaging integration, built one feature at a time.
 
-**Status:** v0.3.3 development — persistent memory and streamed voice conversations.
+**Status:** v0.3.4 development — persistent memory and streamed voice conversations.
 Live microphone acceptance remains in [`docs/release-checks.md`](docs/release-checks.md).
 
 ---
@@ -236,16 +236,25 @@ listening using `.env` settings, so `./scripts/launch_raphael_gpu.sh` is suffici
 `--no-ambient` selects wake-word mode for one run. Local Silero VAD captures
 speech without a wake phrase at 16 kHz. Direct addresses are handled locally;
 possible follow-ups within `AMBIENT_FOLLOWUP_SECONDS` (40 in the example `.env`)
-use an economical `speech_gate` request before a reply. Bounded feedback about
-recent spoken delivery, such as “Why are you talking so fast right now?” or
-“Could you speak more slowly?”, is accepted locally during that window.
-Natural descriptions such as “You sound like a robot, do you know?” also qualify;
-quoted speech and sentences addressed to someone else still go through the gate. An
-uncertain fragment leaves the original follow-up deadline intact; confirmed speech
-to someone else closes it. This feedback rule permits a response; it does not
-itself change the configured `TTS_SPEED`. Unclear intent, malformed judgments, provider
-failure, and ordinary background conversation default to silence. This estimates
-the intended listener from text and context; it does not identify speakers.
+use an economical `speech_gate` request before a reply.
+`AMBIENT_FOLLOWUP_POLICY=conversation` (the default) treats recent dialogue as
+continuing: ordinary questions, answers and topic changes can receive replies
+without repeating the wake phrase. The classifier distinguishes the assistant,
+other listeners and uncertainty. During an active window, valid uncertainty favors
+continuation; clear evidence of another listener closes the window. Fresh sessions,
+expired windows, malformed judgments and provider failures still stay silent.
+Set `AMBIENT_FOLLOWUP_POLICY=strict` to require high classifier confidence on every
+inferred follow-up. Intent confidence and the chosen policy appear in local logs.
+
+Bounded feedback about recent spoken delivery, such as “Why are you talking so
+fast right now?”, “Could you speak more slowly?” and “You sound like a robot, do
+you know?”, is accepted locally during that window. Quoted speech and sentences
+addressed to someone else still go through the gate. Feedback permits a response;
+it does not itself change `TTS_SPEED`. This estimates the intended listener from
+text and recent conversation; it does not identify speakers. Conversation mode
+can therefore respond to ambiguous nearby speech during an active window; strict
+mode favors silence in those cases. Inferred follow-ups do not authorize saved
+personal facts or memory commands.
 Ambient onset keeps 800 ms of preceding audio to preserve the greeting while VAD
 decides speech has begun. The independent keyword spotter also checks ambient audio;
 its confirmed address permits a reply even if command STT misses the name. Greetings

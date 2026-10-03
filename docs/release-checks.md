@@ -93,6 +93,55 @@ and private audio out of reports.
     used again and its temporary CUDA model must be released afterward. Record
     GPU memory and transcript quality; this does not prove hum rejection by itself.
 
+## Recorded validation — 2026-10-04 (v0.3.4 patch)
+
+- 488 unit tests passed; three integrations excluded. Ruff, whitespace checks,
+  and the runtime version command passed.
+- Before the change, a live NIM gate probe with a synthetic recent exchange
+  rejected “What do you want to talk about?” with addressed=false/confidence=0.6.
+  After the change it selected listener=assistant/confidence=0.95 and the
+  application accepted it as `active_conversation`.
+- A second live ordinary follow-up, “Can you suggest something fun?”, was also
+  accepted. “Would you like some tea, Mom?” selected listener=other/confidence=0.95
+  and remained silent. These are intent checks, not microphone acceptance.
+- Configured the local conversation policy with the existing 40-second window.
+  During recent dialogue valid uncertainty favors continuation; strict mode
+  requires high certainty. Provider failures and malformed judgments remain
+  silent in both policies. Inferred turns remain non-explicit and cannot save
+  personal facts through the memory-command handler.
+- Regressions cover unseen topic changes, other listeners, legacy gate JSON,
+  strict mode, expired/reset/user-only contexts, onset-based time windows,
+  malformed confidence, and structured NIM JSON containing cleanup markers.
+- Reproduce using the ambient GPU launcher: ask a question by name, wait for
+  playback, then ask “What do you want to talk about?” without her name. Expect
+  `active_conversation` with logged intent confidence. Address Mom and expect
+  silence; test again after the window expires and in strict mode.
+
+## Recorded validation — 2026-10-04 (v0.3.4 patch)
+
+- 489 unit tests passed; three integrations excluded. Ruff, whitespace checks,
+  and the runtime version command passed.
+- Before the change, a live NIM gate probe with a synthetic recent exchange
+  rejected “What do you want to talk about?” with addressed=false/confidence=0.6.
+  After the change it selected listener=assistant/confidence=0.95 and the
+  application accepted it as `active_conversation`.
+- A second live ordinary follow-up, “Can you suggest something fun?”, was also
+  accepted. “Would you like some tea, Mom?” selected listener=other/confidence=0.95
+  and remained silent. These are intent checks, not microphone acceptance.
+- Configured the local conversation policy with the existing 40-second window.
+  During recent dialogue valid uncertainty favors continuation; strict mode
+  requires high certainty. Provider failures and malformed judgments remain
+  silent in both policies. Inferred turns remain non-explicit and cannot save
+  personal facts through the memory-command handler.
+- Regressions cover unseen topic changes, other listeners, legacy gate JSON,
+  strict mode, expired/reset/user-only contexts, onset-based time windows,
+  stale assistant turns after idle, malformed confidence, and structured NIM
+  JSON containing cleanup markers.
+- Reproduce using the ambient GPU launcher: ask a question by name, wait for
+  playback, then ask “What do you want to talk about?” without her name. Expect
+  `active_conversation` with logged intent confidence. Address Mom and expect
+  silence; test again after the window expires and in strict mode.
+
 ## Recorded validation — 2026-10-04 (v0.3.3 patch)
 
 - 428 unit tests passed; three integrations excluded. Ruff, whitespace checks,

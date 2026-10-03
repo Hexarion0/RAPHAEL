@@ -1,5 +1,6 @@
 """Unit tests for AI providers and fallback manager."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -232,6 +233,39 @@ def completion(content, **kwargs):
         request=httpx.Request("POST", "https://example.test/completions"),
         json={"choices": [{"message": {"content": content, **kwargs}}]},
     )
+
+
+@patch("httpx.Client.post")
+@pytest.mark.parametrize("as_array", [False, True])
+@pytest.mark.parametrize("wrapper", ["plain", "fenced", "reasoning", "reasoning_fenced"])
+def test_nim_preserves_complete_structured_judgments(mock_post, as_array, wrapper):
+    """Gate JSON survives prose markers and literal tags within interpretation data."""
+    judgment = {
+        "addressed": True,
+        "confidence": 0.95,
+        "interpretation": "Direct response: Decision: Final answer: <think>literal</think>",
+    }
+    encoded = json.dumps([judgment] if as_array else judgment)
+    visible = f"```json\n{encoded}\n```" if "fenced" in wrapper else encoded
+    content = visible
+    if "reasoning" in wrapper:
+        content = "<think>Private reasoning.</think>\n" + content
+    mock_post.return_value = completion(content)
+    response = NimProvider(api_key="test-key").send("Judge this speech.")
+    assert response.content == visible
+    parsed = json.loads(response.content.removeprefix("```json\n").removesuffix("\n```"))
+    assert parsed == ([judgment] if as_array else judgment)
+    mock_post.assert_called_once()
+
+
+@pytest.mark.parametrize("content, expected", [
+    ("<think>Private.</think>\nHello, hexarion.", "Hello, hexarion."),
+    ("Reasoning: private notes.\n\nFinal answer: Hello.", "Hello."),
+    ("Final response: \"Hello.\"", "Hello."),
+    ("<think>Unfinished private reasoning.", ""),
+])
+def test_nim_structured_reply_guard_keeps_conversation_cleanup(content, expected):
+    assert NimProvider.clean_reasoning(content) == expected
 
 
 @patch("httpx.Client.post")

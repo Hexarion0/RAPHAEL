@@ -123,3 +123,15 @@ def test_invalid_barge_in_mode_is_rejected():
 
     with pytest.raises(ValueError):
         Settings(_env_file=None, barge_in_mode='anything')
+
+
+def test_followup_policy_is_configurable_and_validated():
+    import pytest
+    from pydantic import ValidationError
+
+    with patch.dict(os.environ, {}, clear=True):
+        assert Settings(_env_file=None).audio.ambient_followup_policy == 'conversation'
+    with patch.dict(os.environ, {'AMBIENT_FOLLOWUP_POLICY': 'strict'}, clear=True):
+        assert Settings(_env_file=None).audio.ambient_followup_policy == 'strict'
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, ambient_followup_policy='anything')

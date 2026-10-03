@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.4 — 2026-10-04 (development)
+
+- Use active conversation state for ordinary follow-ups and topic changes. Valid
+  uncertain intent favors continuing a recent exchange; clear evidence of another
+  listener closes it. New, expired or reset sessions still require an address.
+- Add `AMBIENT_FOLLOWUP_POLICY=conversation|strict`; conversation is the default.
+  Strict retains high-confidence follow-up classification. Failed or malformed
+  judgments remain silent, and inferred turns do not authorize memory writes.
+- Classify assistant/other/uncertain listeners with recent exchange context;
+  expose intent confidence and the selected policy in logs.
+- Preserve structured NIM JSON before conversational cleanup so interpretation
+  strings containing “Direct response:” or reasoning-tag literals stay intact.
+
 ## 0.3.3 — 2026-10-04 (development)
 
 - Accept natural descriptions of recent spoken delivery, including “you sound

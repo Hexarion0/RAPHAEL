@@ -924,7 +924,7 @@ def test_feedback_requires_recent_assistant_speech(monkeypatch):
 def test_uncertain_fragment_keeps_original_followup_deadline(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr('raphael.audio.ambient.time.monotonic', lambda: clock[0])
-    ambient = AmbientConversation()
+    ambient = AmbientConversation(followup_policy='strict')
     ambient.record_addressed('assistant', 'Here is what I can do.')
     original_deadline = ambient.deadline
     router = MagicMock()
@@ -984,5 +984,33 @@ def test_live_clock_recovery_then_robot_feedback_get_two_replies(
         assert assistant_turns[0].content.startswith("It's ")
         assert assistant_turns[1].content == 'I hear you. The voice needs work.'
         assert router.send.call_args.args[0][-1].content == original_feedback
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('followup', [
+    'What do you want to talk about?',
+    'I think we should work on your memory next.',
+    'Can you suggest something fun?',
+])
+def test_live_active_conversation_accepts_uncertain_followup(tmp_path, monkeypatch, followup):
+    router = MagicMock()
+    router.send.side_effect = [
+        LLMResponse("What's something you'd like to work on today?", 'test', 'test'),
+        LLMResponse('{"addressed": false, "confidence": 0.6}', 'test', 'test'),
+        LLMResponse('We could improve the memory together.', 'test', 'test'),
+    ]
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [('Raphael, what are you good at?', {}), (followup, {})], router=router,
+    )
+    try:
+        assert router.send.call_count == 3
+        assert router.send.call_args_list[1].kwargs['purpose'] == 'speech_gate'
+        assert router.send.call_args.args[0][-1].content == followup
+        assert [turn.content for turn in turns if turn.role == 'user'] == [
+            'what are you good at?', followup,
+        ]
+        assert tts.speak.call_count == 2
     finally:
         store.close()
