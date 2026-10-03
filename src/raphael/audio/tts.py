@@ -1,9 +1,11 @@
 import argparse
 import asyncio
 import io
+import queue
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import edge_tts
@@ -136,6 +138,11 @@ class TextToSpeech:
         self._pending_text = ""
         self._play_started_at = 0.0
         self._play_duration = 0.0
+        self._stream_text = ""
+        self._stream_spoken: list[str] | None = None
+        self._stream_played_seconds = 0.0
+        self._synthesis_lock = threading.Lock()
+        self._synthesis_slots = threading.BoundedSemaphore(2)
 
         if self.enabled:
             logger.info(
@@ -391,17 +398,108 @@ class TextToSpeech:
             return self._synthesize_edge_tts(clean_text)
         return self._synthesize_piper(clean_text)
 
-    def speak(self, text: str, block: bool = True) -> bool:
+    def begin_stream(self) -> int:
+        """Start cumulative playback tracking for a sentence-streamed reply."""
+        with self._playback_lock:
+            self._playback_generation += 1
+            self._pending_text = ""
+            self._play_started_at = 0.0
+            self._play_duration = 0.0
+            self._stream_text = ""
+            self._stream_spoken = []
+            self._stream_played_seconds = 0.0
+            return self._playback_generation
+
+    def update_stream(self, generation: int, text: str) -> None:
+        """Track known generated text without reviving a canceled stream."""
+        with self._playback_lock:
+            if generation == self._playback_generation:
+                self._stream_text = self.clean_text_for_speech(text)
+
+    def end_stream(self, generation: int) -> None:
+        """Clear completed stream state; an old worker cannot clear a newer reply."""
+        with self._playback_lock:
+            if generation == self._playback_generation:
+                self._stream_text = ""
+                self._stream_spoken = None
+                self._stream_played_seconds = 0.0
+
+    def _synthesize_cancelable(
+        self, text: str, cancel_event: threading.Event, generation: int,
+    ) -> tuple[np.ndarray, int] | None:
+        """Let a canceled caller leave while a bounded synthesis job unwinds.
+
+        Voice inference is serialized: an old Piper/Fish job cannot race a new
+        job against the same voice object. Its late audio never reaches playback.
+        """
+        def current() -> bool:
+            return not cancel_event.is_set() and generation == self._playback_generation
+
+        while not self._synthesis_slots.acquire(timeout=0.02):
+            if not current():
+                return None
+        result: queue.Queue = queue.Queue(maxsize=1)
+
+        def synthesize() -> None:
+            acquired = False
+            try:
+                while current():
+                    acquired = self._synthesis_lock.acquire(timeout=0.02)
+                    if acquired:
+                        break
+                if acquired and current():
+                    result.put(self.synthesize(text))
+                else:
+                    result.put(None)
+            except Exception as err:
+                result.put(err)
+            finally:
+                if acquired:
+                    self._synthesis_lock.release()
+                self._synthesis_slots.release()
+
+        worker = threading.Thread(target=synthesize, name="raphael-synthesis", daemon=True)
+        try:
+            worker.start()
+        except Exception:
+            self._synthesis_slots.release()
+            raise
+        while current():
+            try:
+                audio = result.get(timeout=0.02)
+                if isinstance(audio, Exception):
+                    raise audio
+                return audio
+            except queue.Empty:
+                continue
+        return None
+
+    def speak(
+        self,
+        text: str,
+        block: bool = True,
+        *,
+        cancel_event: threading.Event | None = None,
+        generation: int | None = None,
+        on_start: Callable[[], None] | None = None,
+    ) -> bool:
         """Synthesize and play speech audio through speakers."""
         if not self.enabled:
             return False
 
         with self._playback_lock:
-            generation = self._playback_generation
+            if generation is None:
+                generation = self._playback_generation
+            if generation != self._playback_generation or (cancel_event and cancel_event.is_set()):
+                return False
             self._pending_text = self.clean_text_for_speech(text)
             self._play_started_at = 0.0
             self._play_duration = 0.0
-        synth_result = self.synthesize(text)
+        if cancel_event is not None:
+            synth_result = self._synthesize_cancelable(text, cancel_event, generation)
+        else:
+            with self._synthesis_lock:
+                synth_result = self.synthesize(text)
         if synth_result is None:
             with self._playback_lock:
                 if generation == self._playback_generation:
@@ -412,18 +510,26 @@ class TextToSpeech:
 
         try:
             with self._playback_lock:
-                if generation != self._playback_generation:
+                if (
+                    generation != self._playback_generation
+                    or (cancel_event and cancel_event.is_set())
+                ):
                     return False
                 self._stop_event.clear()
                 self._is_playing = True
                 self._play_started_at = time.monotonic()
                 self._play_duration = audio.size / sample_rate
                 sd.play(audio, samplerate=sample_rate, device=self.output_device)
+            if on_start:
+                on_start()
             if block:
                 # Poll our stop_event instead of calling sd.wait() directly.
                 # On Linux, sd.stop() does not reliably unblock a concurrent sd.wait()
                 # due to a PortAudio race condition, which permanently stalls the worker.
                 while not self._stop_event.wait(timeout=0.02):
+                    if cancel_event and cancel_event.is_set():
+                        self.stop()
+                        break
                     try:
                         if not sd.get_stream().active:
                             break
@@ -432,6 +538,9 @@ class TextToSpeech:
                 with self._playback_lock:
                     if generation == self._playback_generation:
                         self._is_playing = False
+                        if self._stream_spoken is not None:
+                            self._stream_spoken.append(self._pending_text)
+                            self._stream_played_seconds += self._play_duration
                         self._pending_text = ""
             else:
                 # Clear playback state when audio finishes or stop is requested.
@@ -450,7 +559,7 @@ class TextToSpeech:
                                 self._pending_text = ""
 
                 threading.Thread(target=_wait_done, daemon=True).start()
-            return True
+            return generation == self._playback_generation
         except Exception as err:
             logger.error("Error playing TTS audio: %s", err)
             self._is_playing = False
@@ -460,22 +569,29 @@ class TextToSpeech:
         """Immediately stop audio playback (barge-in support)."""
         with self._playback_lock:
             interruption = None
-            if self._pending_text:
+            if self._pending_text or self._stream_text:
                 elapsed = (
                     max(0.0, time.monotonic() - self._play_started_at)
-                    if self._play_started_at else 0.0
+                    if self._pending_text and self._play_started_at else 0.0
                 )
-                fraction = min(1.0, elapsed / self._play_duration) if self._play_duration else 0.0
+                duration = self._play_duration if self._pending_text else 0.0
+                fraction = min(1.0, elapsed / duration) if duration else 0.0
                 words = self._pending_text.split()
                 heard = int(len(words) * fraction)
+                spoken = " ".join([*(self._stream_spoken or []), " ".join(words[:heard])]).strip()
+                full = self._stream_text or self._pending_text
+                remaining = " ".join(full.split()[len(spoken.split()):])
                 interruption = {
-                    "full_text": self._pending_text[:4000],
-                    "estimated_spoken_text": " ".join(words[:heard])[:4000],
-                    "remaining_text": " ".join(words[heard:])[:4000],
-                    "played_seconds": round(elapsed, 2),
-                    "duration_seconds": round(self._play_duration, 2),
+                    "full_text": full[:4000],
+                    "estimated_spoken_text": spoken[:4000],
+                    "remaining_text": remaining[:4000],
+                    "played_seconds": round(self._stream_played_seconds + elapsed, 2),
+                    "duration_seconds": round(self._stream_played_seconds + duration, 2),
                 }
             self._pending_text = ""
+            self._stream_text = ""
+            self._stream_spoken = None
+            self._stream_played_seconds = 0.0
             self._playback_generation += 1
             self._stop_event.set()
             was_playing = self._is_playing

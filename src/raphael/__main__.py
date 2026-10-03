@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 
+from raphael import __version__
 from raphael.conversation import is_farewell, strip_wake_phrase
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +17,7 @@ PREPARED_DATASET_DIR = PROJECT_ROOT / "training" / "dataset"
 def main() -> int:
     """Initialize core settings, start logging, and launch RAPHAEL."""
     parser = argparse.ArgumentParser(description="RAPHAEL Desktop AI Assistant")
+    parser.add_argument("--version", action="version", version=f"RAPHAEL {__version__}")
     parser.add_argument(
         "command",
         nargs="?",
@@ -162,7 +164,7 @@ def main() -> int:
     logger = setup_logging(settings.app.log_level)
 
     logger.info("==========================================")
-    logger.info("   RAPHAEL - Desktop AI Assistant v0.2.0  ")
+    logger.info("   RAPHAEL - Desktop AI Assistant v%s  ", __version__)
     logger.info("==========================================")
     logger.info("Environment: %s | Log Level: %s", settings.app.env, settings.app.log_level)
 
@@ -227,6 +229,7 @@ def main() -> int:
             min_confidence=settings.audio.stt_min_confidence,
             retry_confidence=settings.audio.stt_retry_confidence,
             retry_model=settings.audio.stt_retry_model,
+            retry_min_free_mb=settings.audio.stt_retry_min_free_mb,
             wake_phrase=settings.audio.wake_word,
         )
         tts = TextToSpeech(
@@ -285,6 +288,8 @@ def main() -> int:
         def speak_reply(text: str, block: bool = True, cancel_event=None) -> bool:
             if not loop.is_running or (cancel_event is not None and cancel_event.is_set()):
                 return False
+            if cancel_event is not None:
+                return tts.speak(text, block=block, cancel_event=cancel_event)
             return tts.speak(text, block=block)
 
         def linked_fragments(info: dict) -> list[str]:
@@ -514,8 +519,25 @@ def main() -> int:
                 logger.info("Merged %d spoken fragments into one pending request.", len(parts))
 
             try:
-                response = router.send(context_messages, temperature=0.7, max_tokens=400)
+                streamed = None
+                if settings.audio.tts_streaming:
+                    from raphael.audio.streaming import stream_reply
+
+                    streamed = stream_reply(
+                        router, context_messages, tts, current, cancel_event=cancel_event,
+                    )
+                    response = streamed.response
+                else:
+                    response = router.send(context_messages, temperature=0.7, max_tokens=400)
                 if not current():
+                    if streamed is not None and streamed.first_audio_seconds is not None:
+                        # Preserve what was generated once some of it reached playback.
+                        conv_manager.add_turn(
+                            role="assistant",
+                            content=response.content + "\n[Playback was interrupted.]",
+                            provider=response.provider, model=response.model,
+                            latency=response.latency,
+                        )
                     logger.info("Discarded an old response because speech resumed.")
                     return False
                 reply_text = response.content.strip()
@@ -529,7 +551,10 @@ def main() -> int:
                 # Record assistant turn in persistent SQLite session
                 conv_manager.add_turn(
                     role="assistant",
-                    content=reply_text,
+                    content=(
+                        reply_text + "\n[Generation ended early because the connection failed.]"
+                        if streamed is not None and streamed.error is not None else reply_text
+                    ),
                     provider=response.provider,
                     model=response.model,
                     latency=response.latency,
@@ -539,7 +564,16 @@ def main() -> int:
                     return False
                 # Summaries run separately so the next reply never waits for an extra LLM call.
                 conv_manager.schedule_summary(router_or_provider=router)
-                said = say(reply_text)
+                if streamed is None:
+                    said = say(reply_text)
+                else:
+                    said = streamed.spoken
+                    if ambient_enabled[0]:
+                        ambient_context.record_addressed("assistant", reply_text)
+                        ambient_context.replied()
+                    if streamed.error is not None:
+                        logger.warning("Reply stream ended early: %s", streamed.error)
+                        say("My connection cut out before I finished. Ask me to continue.")
                 if said and current() and interrupted_reply[0] is playback_context:
                     interrupted_reply[0] = {}
                 if said and current() and unfinished_request[0] is request:

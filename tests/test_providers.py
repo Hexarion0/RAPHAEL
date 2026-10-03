@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from raphael.providers.base import ChatMessage, LLMProvider, LLMResponse
+from raphael.providers.base import ChatMessage, LLMProvider, LLMResponse, LLMStreamChunk
 from raphael.providers.groq import GroqProvider
 from raphael.providers.manager import ProviderManager
 from raphael.providers.nim import NimProvider
@@ -141,6 +141,87 @@ def test_provider_manager_all_fail():
 
     with pytest.raises(RuntimeError, match="All AI providers in fallback chain failed"):
         manager.send_with_fallback("Hello")
+
+
+def test_stream_falls_back_before_text_but_never_splices_after_partial_reply():
+    manager = ProviderManager(fallback_chain=["nim", "groq"])
+    primary, backup = MagicMock(), MagicMock()
+    primary.is_configured.return_value = backup.is_configured.return_value = True
+    primary.stream.side_effect = RuntimeError("offline")
+    backup.stream.side_effect = lambda **kwargs: iter([LLMStreamChunk("Backup.", "test", "groq")])
+    manager.register_provider("nim", primary)
+    manager.register_provider("groq", backup)
+    assert [part.delta for part in manager.stream_with_fallback("Hello")] == ["Backup."]
+    backup.reset_mock()
+
+    def broken(**kwargs):
+        yield LLMStreamChunk("Partial.", "test", "nim")
+        raise RuntimeError("connection lost")
+
+    primary.stream.side_effect = broken
+    stream = manager.stream_with_fallback("Hello")
+    assert next(stream).delta == "Partial."
+    with pytest.raises(RuntimeError, match="after a partial reply"):
+        next(stream)
+    backup.stream.assert_not_called()
+
+
+def test_canceled_stream_does_not_start_fallback():
+    from threading import Event
+
+    canceled = Event()
+    manager = ProviderManager(fallback_chain=["nim", "groq"])
+    primary, backup = MagicMock(), MagicMock()
+    primary.is_configured.return_value = backup.is_configured.return_value = True
+
+    def interrupted(**kwargs):
+        canceled.set()
+        raise RuntimeError("closed by barge-in")
+
+    primary.stream.side_effect = interrupted
+    manager.register_provider("nim", primary)
+    manager.register_provider("groq", backup)
+    assert list(manager.stream_with_fallback("Hello", cancel_event=canceled)) == []
+    backup.stream.assert_not_called()
+
+
+@pytest.mark.parametrize("provider_class", [NimProvider, GroqProvider, OpenRouterProvider,
+                                          OllamaProvider])
+def test_stream_cancel_control_is_not_sent_to_api(provider_class, monkeypatch):
+    import json
+    from threading import Event
+
+    provider = (
+        provider_class() if provider_class is OllamaProvider else provider_class(api_key="test")
+    )
+    response, client = MagicMock(), MagicMock()
+    client.__enter__.return_value = client
+    client.stream.return_value.__enter__.return_value = response
+    data = ({"message": {"content": "Hi."}, "done": True} if provider_class is OllamaProvider
+            else {"choices": [{"delta": {"content": "Hi."}}]})
+    response.iter_lines.return_value = iter([
+        json.dumps(data) if provider_class is OllamaProvider else "data: " + json.dumps(data),
+    ])
+    monkeypatch.setattr("httpx.Client", lambda **kwargs: client)
+    assert [part.delta for part in provider.stream("Hi", cancel_event=Event())] == ["Hi."]
+    payload = client.stream.call_args.kwargs["json"]
+    assert "cancel_event" not in payload
+    json.dumps(payload)  # Must remain JSON serializable.
+
+
+def test_http_stream_client_closes_when_canceled(monkeypatch):
+    from threading import Event
+
+    from raphael.providers.streaming import streaming_client
+
+    canceled, closed = Event(), Event()
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.close.side_effect = closed.set
+    monkeypatch.setattr("httpx.Client", lambda **kwargs: client)
+    with streaming_client(5, canceled):
+        canceled.set()
+        assert closed.wait(0.5)
 
 
 def completion(content, **kwargs):

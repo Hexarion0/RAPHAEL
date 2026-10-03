@@ -1,4 +1,4 @@
-# v0.2 Release Checks
+# v0.3 Release Checks
 
 Run from the repository root with the development environment active.
 
@@ -77,7 +77,37 @@ and private audio out of reports.
    names, dates, quantities, and negations should get a clarification, not a saved
    inferred correction. Repeat with the actual PC hum and record missed/false wakes.
 
-## Recorded validation — 2026-10-02
+10. With `TTS_STREAMING=true`, ask for a multi-sentence explanation. Confirm the
+    first sentence plays before the entire reply arrives and history contains one
+    assistant turn. Compare logged first-text and first-audio times with batch mode
+    (`TTS_STREAMING=false`) using the same model, voice, and question. Interrupt
+    during the first sentence, synthesis, and a gap between sentences: later queued
+    audio must not play. Say `Raphael, continue` and check completed sentences are
+    represented in interruption context. Ask for code and verify it remains in
+    history while spoken output omits the code block. Disconnect after a sentence
+    starts: expect a connection-cutoff notice, without a fallback answer being
+    appended to the partially spoken reply.
+11. While voice training is running, ask a short unclear question that triggers
+    STT retry. Below `STT_RETRY_MIN_FREE_MB`, expect a primary-model retry without
+    allocating `medium.en`. After training releases VRAM, a stronger retry can be
+    used again and its temporary CUDA model must be released afterward. Record
+    GPU memory and transcript quality; this does not prove hum rejection by itself.
+
+## Recorded validation — 2026-10-03 (v0.3 development)
+
+- 350 unit tests passed; three hardware/model integrations excluded.
+- Regression checks cover speech before generation finishes, cancellation during
+  network reads, synthesis and playback, merged additions, partial failures,
+  cumulative interruption context, and STT retries under simulated VRAM pressure.
+- Ruff and `git diff --check` passed.
+- Built `raphael-0.3.0-py3-none-any.whl` and installed it into an isolated target
+  directory using the existing environment's dependencies. Verified installed
+  package imports, version metadata, module CLI and entry-point CLI with `--help`
+  and `--version` from outside the checkout.
+- Live microphone, cloud latency, GPU training-load and voice restart acceptance
+  remain pending. No stable v0.3 release tag was created.
+
+## Recorded validation — 2026-10-02 (v0.2)
 
 - 128 unit tests passed; three integrations excluded by default.
 - Ruff and whitespace checks passed across the repository changes.

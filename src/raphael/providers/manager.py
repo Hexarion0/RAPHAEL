@@ -1,6 +1,7 @@
 """Multi-provider coordinator with automated fallback chain and health tracking."""
 
 from collections.abc import Iterator
+from threading import Event
 from typing import Any
 
 from raphael.logging import get_logger
@@ -136,6 +137,7 @@ class ProviderManager:
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        cancel_event: Event | None = None,
         **kwargs: Any,
     ) -> Iterator[LLMStreamChunk]:
         """Stream response from the first functioning provider."""
@@ -147,21 +149,36 @@ class ProviderManager:
                 order.append(name)
 
         for provider_name in order:
+            if cancel_event is not None and cancel_event.is_set():
+                return
             provider = self.providers[provider_name]
             if not provider.is_configured():
                 continue
 
+            emitted = False
             try:
                 logger.debug("Attempting stream with provider '%s'...", provider_name)
-                yield from provider.stream(
+                for chunk in provider.stream(
                     messages=messages,
                     model=model if (preferred_provider == provider_name) else None,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    cancel_event=cancel_event,
                     **kwargs,
-                )
-                return
+                ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+                    emitted |= bool(chunk.delta)
+                    yield chunk
+                if emitted or (cancel_event is not None and cancel_event.is_set()):
+                    return
+                raise RuntimeError("Provider stream returned no reply text")
             except Exception as err:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                if emitted:
+                    # Switching after speech started would splice unrelated answers.
+                    raise RuntimeError("Provider stream failed after a partial reply") from err
                 logger.warning(
                     "Provider '%s' streaming failed: %s. Attempting fallback.",
                     provider_name,

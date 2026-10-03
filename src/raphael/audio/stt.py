@@ -3,6 +3,7 @@
 import gc
 import math
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,18 @@ from raphael.conversation import strip_wake_phrase
 from raphael.logging import get_logger
 
 logger = get_logger("audio.stt")
+
+
+def free_cuda_memory_mb() -> int | None:
+    """Read current free memory on the default GPU, with a bounded optional probe."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits", "-i", "0"],
+            capture_output=True, text=True, timeout=0.5, check=True,
+        )
+        return int(result.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 # Common Whisper hallucination patterns on silence or ambient noise
 _HALLUCINATION_PATTERNS = [
@@ -67,6 +80,7 @@ class SpeechToText:
         retry_confidence: float = 0.55,
         retry_model: str | None = None,
         wake_phrase: str = "hey raphael",
+        retry_min_free_mb: int = 2048,
     ) -> None:
         if not 0.0 <= min_confidence <= 1.0 or not 0.0 <= retry_confidence <= 1.0:
             raise ValueError("STT confidence thresholds must be between zero and one")
@@ -78,6 +92,7 @@ class SpeechToText:
         self.min_confidence = min_confidence
         self.retry_confidence = retry_confidence
         self.retry_model_size = retry_model or None
+        self.retry_min_free_mb = retry_min_free_mb
         self.wake_phrase = wake_phrase
         self._retry_model: WhisperModel | None = None
         self._retry_blocked_devices: set[str] = set()
@@ -344,9 +359,24 @@ class SpeechToText:
                     result["confidence"], self.retry_model_size or self.model_size,
                 )
                 try:
-                    if self.retry_model_size and self._retry_model is None:
+                    retry_size = self.retry_model_size
+                    # Reuse the primary model when the requested retry is identical.
+                    if retry_size == self.model_size:
+                        retry_size = None
+                    if retry_size and self.device == "cuda" and self.retry_min_free_mb:
+                        free_mb = free_cuda_memory_mb()
+                        needed_mb = self.retry_min_free_mb if self._retry_model is None else 512
+                        if free_mb is None or free_mb < needed_mb:
+                            self._retry_model = None
+                            retry_size = None
+                            gc.collect()
+                            logger.info(
+                                "Using primary STT for quality retry: free VRAM=%s MB, "
+                                "required=%d MB.", free_mb, needed_mb,
+                            )
+                    if retry_size and self._retry_model is None:
                         self._retry_model = WhisperModel(
-                            self.retry_model_size,
+                            retry_size,
                             device=self.device,
                             compute_type=self.compute_type,
                         )
@@ -357,7 +387,7 @@ class SpeechToText:
                             "patience": 1.5,
                             "max_new_tokens": 128,
                         },
-                        model=self._retry_model,
+                        model=self._retry_model if retry_size else self.model,
                     )
                     if candidate["confidence"] > result["confidence"]:
                         result = candidate
@@ -370,7 +400,12 @@ class SpeechToText:
                             "Disabled STT quality retries on %s after memory exhaustion; "
                             "keeping primary transcription.", self.device,
                         )
-                if self.device in self._retry_blocked_devices:
+                if self.device == "cuda" and self._retry_model is not None:
+                    # A temporary quality upgrade should not occupy training VRAM
+                    # after this utterance. CPU retries can retain their cache.
+                    self._retry_model = None
+                    gc.collect()
+                elif self.device in self._retry_blocked_devices:
                     # The exception traceback has now been released as well.
                     gc.collect()
         result["needs_repeat"] = (

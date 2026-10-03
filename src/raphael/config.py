@@ -122,6 +122,7 @@ class AudioConfig(BaseModel):
     stt_min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
     stt_retry_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
     stt_retry_model: str | None = Field(default=None)
+    stt_retry_min_free_mb: int = Field(default=2048, ge=0, le=65536)
     utterance_silence_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
     utterance_pause_grace_seconds: float = Field(default=0.8, ge=0, le=3)
     tts_engine: str = Field(
@@ -140,6 +141,7 @@ class AudioConfig(BaseModel):
         default=True,
         description="Enable speech synthesis voice output",
     )
+    tts_streaming: bool = Field(default=True)
     fish_speech_url: str = Field(
         default="http://127.0.0.1:8080/v1/tts",
         description="Local Fish Speech API server endpoint",
@@ -235,12 +237,14 @@ class Settings(BaseSettings):
     stt_min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
     stt_retry_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
     stt_retry_model: str | None = Field(default=None)
+    stt_retry_min_free_mb: int = Field(default=2048, ge=0, le=65536)
     utterance_silence_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
     utterance_pause_grace_seconds: float = Field(default=0.8, ge=0, le=3)
     tts_engine: str = Field(default="auto")
     tts_voice: str = Field(default="mommy")
     tts_speed: float = Field(default=1.0)
     tts_enabled: bool = Field(default=True)
+    tts_streaming: bool = Field(default=True)
     fish_speech_url: str = Field(default="http://127.0.0.1:8080/v1/tts")
     fish_ref_audio: str = Field(default="data/voices/mommy/ref.wav")
     fish_ref_text: str = Field(
@@ -318,12 +322,14 @@ class Settings(BaseSettings):
             stt_min_confidence=self.stt_min_confidence,
             stt_retry_confidence=self.stt_retry_confidence,
             stt_retry_model=self.stt_retry_model,
+            stt_retry_min_free_mb=self.stt_retry_min_free_mb,
             utterance_silence_seconds=self.utterance_silence_seconds,
             utterance_pause_grace_seconds=self.utterance_pause_grace_seconds,
             tts_engine=self.tts_engine,
             tts_voice=self.tts_voice,
             tts_speed=self.tts_speed,
             tts_enabled=self.tts_enabled,
+            tts_streaming=self.tts_streaming,
             fish_speech_url=self.fish_speech_url,
             fish_ref_audio=self.fish_ref_audio,
             fish_ref_text=self.fish_ref_text,

@@ -10,6 +10,7 @@ import httpx
 from raphael.config import get_settings
 from raphael.logging import get_logger
 from raphael.providers.base import ChatMessage, LLMProvider, LLMResponse, LLMStreamChunk
+from raphael.providers.streaming import streaming_client
 
 logger = get_logger("providers.ollama")
 
@@ -94,6 +95,9 @@ class OllamaProvider(LLMProvider):
         **kwargs: Any,
     ) -> Iterator[LLMStreamChunk]:
         """Stream chat tokens from Ollama."""
+        cancel_event = kwargs.pop("cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            return
         msgs = self.normalize_messages(messages)
         target_model = model or self.default_model
 
@@ -108,7 +112,7 @@ class OllamaProvider(LLMProvider):
             **kwargs,
         }
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with streaming_client(self.timeout, cancel_event) as client:
             with client.stream(
                 "POST",
                 f"{self.host}/api/chat",
@@ -116,6 +120,8 @@ class OllamaProvider(LLMProvider):
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
                     line = line.strip()
                     if not line:
                         continue

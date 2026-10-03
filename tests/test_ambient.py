@@ -159,6 +159,7 @@ def test_vad_preserves_partial_chunks_and_converts_integer_audio(monkeypatch):
 def run_callbacks(
     tmp_path, monkeypatch, utterances, *, ambient=True, router=None, observed=None,
     tts=None, interrupted=None,
+    streaming=False,
 ):
     """Run real CLI callbacks using an isolated DB and no audio hardware."""
     import sys
@@ -167,7 +168,9 @@ def run_callbacks(
     from raphael.memory import MemoryStore
     from raphael.persona import PERSONA_CONTEXT_VERSION
 
-    settings = config.Settings(_env_file=None, memory_db_path=str(tmp_path / "memory.db"))
+    settings = config.Settings(
+        _env_file=None, memory_db_path=str(tmp_path / "memory.db"), tts_streaming=streaming,
+    )
     monkeypatch.setattr(config, "get_settings", lambda: settings)
     monkeypatch.setattr(platform, "get_audio_backend", MagicMock())
     router = router or MagicMock()
@@ -194,7 +197,10 @@ def run_callbacks(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(audio, "WakeListenerLoop", listener)
-    monkeypatch.setattr(__main__.time, "sleep", interrupt)
+    # Patch only the CLI clock: background provider threads use real time.sleep.
+    monkeypatch.setattr(__main__, "time", SimpleNamespace(
+        sleep=interrupt, monotonic=__main__.time.monotonic,
+    ))
     monkeypatch.setattr(sys, "argv", ["raphael", "--ambient" if ambient else "--listen"])
     assert __main__.main() == 0
     store = MemoryStore(settings.memory.db_path)
@@ -224,6 +230,128 @@ def test_followup_window_begins_after_long_playback(tmp_path, monkeypatch):
     try:
         assert tts.speak.call_count == 2
         assert router.send.call_count == 2
+    finally:
+        store.close()
+
+
+def test_live_stream_speaks_sentences_once_and_persists_one_assistant_turn(tmp_path, monkeypatch):
+    from raphael.providers.base import LLMStreamChunk
+
+    router, tts = MagicMock(), MagicMock()
+    router.stream.side_effect = lambda *args, **kwargs: iter([
+        LLMStreamChunk("First sentence. ", "stream-model", "nim"),
+        LLMStreamChunk("Second sentence.", "stream-model", "nim"),
+    ])
+
+    def speak(text, **kwargs):
+        kwargs["on_start"]()
+        return True
+
+    tts.speak.side_effect = speak
+    _router, _tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch, [("Raphael, explain streaming.", {})],
+        router=router, tts=tts, streaming=True,
+    )
+    try:
+        router.send.assert_not_called()
+        assert [call.args[0] for call in tts.speak.call_args_list] == [
+            "First sentence.", "Second sentence.",
+        ]
+        assert [(turn.role, turn.content) for turn in turns] == [
+            ("user", "explain streaming."), ("assistant", "First sentence. Second sentence."),
+        ]
+        assert turns[-1].model == "stream-model"
+    finally:
+        store.close()
+
+
+def test_canceled_stream_and_new_addition_preserve_combined_request(tmp_path, monkeypatch):
+    from raphael.providers.base import LLMStreamChunk
+
+    canceled, replacement = Event(), Event()
+    router = MagicMock()
+
+    def generate(messages, **kwargs):
+        if router.stream.call_count == 1:
+            canceled.set()
+            yield LLMStreamChunk("Discard this.", "stream-model", "nim")
+        else:
+            yield LLMStreamChunk("A combined answer.", "stream-model", "nim")
+
+    router.stream.side_effect = generate
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [("Raphael, explain streaming.", {"cancel_event": canceled}),
+         ("And include interruptions.", {
+             "cancel_event": replacement, "supersedes_cancel_event": canceled,
+         })], router=router, streaming=True,
+    )
+    try:
+        router.send.assert_not_called()
+        assert [turn.role for turn in turns] == ["user", "user", "assistant"]
+        messages = router.stream.call_args.args[0]
+        assert [message.content for message in messages if message.role == "user"] == [
+            "explain streaming.\nAnd include interruptions.",
+        ]
+        tts.speak.assert_called_once()
+    finally:
+        store.close()
+
+
+def test_live_stream_interrupted_after_audio_starts_archives_partial_reply(tmp_path, monkeypatch):
+    from raphael.providers.base import LLMStreamChunk
+
+    cancel = Event()
+    router, tts = MagicMock(), MagicMock()
+    router.stream.side_effect = lambda *args, **kwargs: iter([
+        LLMStreamChunk("First sentence. Second sentence. ", "stream-model", "nim"),
+    ])
+
+    def speak(text, **kwargs):
+        kwargs["on_start"]()
+        cancel.set()
+        return False
+
+    tts.speak.side_effect = speak
+    _router, _tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch, [("Raphael, explain streaming.", {"cancel_event": cancel})],
+        router=router, tts=tts, streaming=True,
+    )
+    try:
+        assert [turn.role for turn in turns] == ["user", "assistant"]
+        assert turns[-1].content.endswith("[Playback was interrupted.]")
+        assert "First sentence." in turns[-1].content
+        assert [call.args[0] for call in tts.speak.call_args_list] == ["First sentence."]
+    finally:
+        store.close()
+
+
+def test_live_partial_stream_failure_speaks_notice_without_repeating_answer(tmp_path, monkeypatch):
+    from raphael.providers.base import LLMStreamChunk
+
+    router, tts = MagicMock(), MagicMock()
+
+    def generate(*args, **kwargs):
+        yield LLMStreamChunk("First sentence. ", "stream-model", "nim")
+        raise RuntimeError("connection lost")
+
+    def speak(text, **kwargs):
+        if "on_start" in kwargs:
+            kwargs["on_start"]()
+        return True
+
+    router.stream.side_effect = generate
+    tts.speak.side_effect = speak
+    _router, _tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch, [("Raphael, explain streaming.", {})],
+        router=router, tts=tts, streaming=True,
+    )
+    try:
+        assert [call.args[0] for call in tts.speak.call_args_list] == [
+            "First sentence.", "My connection cut out before I finished. Ask me to continue.",
+        ]
+        assert turns[-1].content.endswith("[Generation ended early because the connection failed.]")
+        router.send.assert_not_called()
     finally:
         store.close()
 
@@ -301,7 +429,9 @@ def test_live_canceled_request_and_short_addition_are_merged(tmp_path, monkeypat
         assert [turn.content for turn in turns if turn.role == 'assistant'] == [
             'Here is what I am good at.'
         ]
-        tts.speak.assert_called_once_with('Here is what I am good at.', block=True)
+        tts.speak.assert_called_once_with(
+            'Here is what I am good at.', block=True, cancel_event=replacement,
+        )
     finally:
         store.close()
 

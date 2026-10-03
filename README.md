@@ -2,7 +2,8 @@
 
 > A JARVIS-style, always-listening desktop AI assistant — its own voice, multi-provider AI routing, memory, and messaging integration, built one feature at a time.
 
-**Status:** 🚧 Early development — see [`docs/roadmap.md`](docs/roadmap.md) for current progress.
+**Status:** v0.3.0 development — persistent memory and streamed voice conversations.
+Live microphone acceptance remains in [`docs/release-checks.md`](docs/release-checks.md).
 
 ---
 
@@ -16,6 +17,7 @@ RAPHAEL is a personal desk assistant that listens for a wake word, talks back in
 - 🎙️ Wake word detection + speech-to-text (local, via Whisper)
 - 🧠 Multi-provider AI backend (NVIDIA NIM, OpenRouter, Groq, Ollama) with a fast/complex-task router
 - 🔊 Text-to-speech with its own voice
+- Completed sentences play while the AI is still generating; interruptions cancel queued speech
 - 💾 Persistent memory (short-term + long-term)
 
 **Planned extensions**
@@ -273,6 +275,33 @@ system default. Numeric device indices in `.env` are parsed as integers.
 See [release checks](docs/release-checks.md) for automated validation and the
 live microphone checks required before tagging a release.
 
+### Streaming replies and shared GPU use
+
+`TTS_STREAMING=true` (the default) connects provider tokens to sentence-sized speech.
+Generation continues during playback, so the first sentence can play before the
+whole response finishes. Set `TTS_STREAMING=false` to restore batch replies.
+Reasoning tags are filtered across token boundaries. Code remains in conversation
+history and is omitted from spoken output. Provider fallback happens before text
+arrives; a connection failure after a partial answer is reported rather than
+splicing a second provider's answer onto it.
+
+New speech cancels pending network reads, synthesis, and queued sentences. An old
+synthesis job may finish internally, but its audio cannot play; canceled callers
+return promptly. Voice inference is serialized, and worker queues are bounded.
+Interruption context includes completed sentences and the estimated position in
+the current sentence. An interrupted generated reply is archived only if playback
+started, with an interruption note. Logs separate first text, first audio, provider
+generation time, and total reply time; these are measurements, not latency guarantees.
+
+While voice training shares the GPU, use `small.en` with `int8_float16` for command
+STT (the example configuration). Before allocating a separate CUDA quality-retry
+model, RAPHAEL checks free VRAM on its default GPU. `STT_RETRY_MIN_FREE_MB=2048`
+sets the minimum; if memory is lower or cannot be checked, the already loaded
+primary model receives a stronger decode instead. Temporary CUDA retry models
+release their allocation after use. CPU retry models remain cached. Set the
+threshold to `0` to disable the probe. This reduces avoidable allocations; another
+process can still change free memory between the check and inference.
+
 ## Roadmap
 
 RAPHAEL is being built one feature at a time, fully refined before moving to the next.
@@ -280,8 +309,8 @@ RAPHAEL is being built one feature at a time, fully refined before moving to the
 | Version | Milestone | Status |
 |---|---|---|
 | `v0.1` | Project foundation | ✅ |
-| `v0.2` | Core AI (wake word → STT → router → LLM → TTS) | ⬜ |
-| `v0.3` | Persistent memory | ⬜ |
+| `v0.2` | Core AI (wake word → STT → router → LLM → TTS) | Tagged |
+| `v0.3` | Persistent memory + streamed voice | Development; live acceptance pending |
 | `v0.4` | Skills and actions | ⬜ |
 | `v0.5` | Web dashboard | ⬜ |
 | `v0.6` | Telegram + Discord | ⬜ |

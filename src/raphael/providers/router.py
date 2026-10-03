@@ -1,4 +1,5 @@
 import re
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
@@ -254,6 +255,8 @@ class ModelRouter:
         messages: list[ChatMessage],
         temperature: float = 0.7,
         max_tokens: int | None = 512,
+        *,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[LLMStreamChunk]:
         """Route and stream chat completion tokens with automatic fallback."""
         decision = self.route(self._routing_text(messages))
@@ -265,6 +268,7 @@ class ModelRouter:
             model=decision.model_name,
             temperature=temperature,
             max_tokens=max_tokens or 512,
+            cancel_event=cancel_event,
         )
 
     @staticmethod

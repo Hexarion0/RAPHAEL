@@ -33,7 +33,9 @@ def test_env_listening_defaults_and_cli_overrides(tmp_path, monkeypatch, argumen
     def interrupt(_seconds):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(__main__.time, 'sleep', interrupt)
+    monkeypatch.setattr(__main__, 'time', SimpleNamespace(
+        sleep=interrupt, monotonic=__main__.time.monotonic,
+    ))
     monkeypatch.setattr(sys, 'argv', ['raphael', *arguments])
     assert __main__.main() == 0
     assert constructor.call_args.kwargs['ambient'] is enabled
@@ -85,7 +87,9 @@ def test_listen_wake_or_uncertain_speech_does_not_call_provider(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(audio, "WakeListenerLoop", listener)
-    monkeypatch.setattr(__main__.time, "sleep", interrupt)
+    monkeypatch.setattr(__main__, "time", SimpleNamespace(
+        sleep=interrupt, monotonic=__main__.time.monotonic,
+    ))
     monkeypatch.setattr(sys, "argv", ["raphael", "--listen"])
     assert __main__.main() == 0
     assert followup == [True]
@@ -125,7 +129,9 @@ def test_listen_archives_legacy_style_but_keeps_saved_facts(tmp_path, monkeypatc
     from raphael.persona import PERSONA_CONTEXT_VERSION
     from raphael.providers.base import LLMResponse
 
-    settings = config.Settings(_env_file=None, memory_db_path=str(tmp_path / "memory.db"))
+    settings = config.Settings(
+        _env_file=None, memory_db_path=str(tmp_path / "memory.db"), tts_streaming=False,
+    )
     store = MemoryStore(settings.memory.db_path)
     legacy = ConversationManager(store=store, session_id="desktop_session")
     legacy_answer = "I follow protocol. Speak clearly. I am waiting."
@@ -168,7 +174,9 @@ def test_listen_archives_legacy_style_but_keeps_saved_facts(tmp_path, monkeypatc
         raise KeyboardInterrupt
 
     monkeypatch.setattr(audio, "WakeListenerLoop", listener)
-    monkeypatch.setattr(__main__.time, "sleep", interrupt)
+    monkeypatch.setattr(__main__, "time", SimpleNamespace(
+        sleep=interrupt, monotonic=__main__.time.monotonic,
+    ))
     monkeypatch.setattr(sys, "argv", ["raphael", "--listen"])
 
     assert __main__.main() == 0

@@ -671,6 +671,17 @@ restart. The checklist below remains the live voice acceptance test.
 
 ## v0.3 — Memory Complete
 
+Current development version: **0.3.0**. Persistent SQLite facts, corrections,
+deletion, restart recall, and background summaries are implemented. This version
+also connects streamed provider replies to sentence playback, preserves interrupted
+requests and playback context, and budgets CUDA STT quality retries during voice
+training. Runtime, package, and startup banner versions now agree.
+
+The live restart checklist above and microphone acceptance in
+[`release-checks.md`](release-checks.md) remain pending. Memory proposals in 2.3.2
+also remain planned. The version bump does not mark these checks complete or
+create a stable release tag. Skills/actions are the next development milestone.
+
 ```bash
 git tag v0.3
 git push origin v0.3

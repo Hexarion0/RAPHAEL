@@ -10,6 +10,7 @@ import httpx
 from raphael.config import get_settings
 from raphael.logging import get_logger
 from raphael.providers.base import ChatMessage, LLMProvider, LLMResponse, LLMStreamChunk
+from raphael.providers.streaming import streaming_client
 
 logger = get_logger("providers.nim")
 
@@ -258,6 +259,9 @@ class NimProvider(LLMProvider):
         **kwargs: Any,
     ) -> Iterator[LLMStreamChunk]:
         """Stream completion chunks, retrying three times before falling back."""
+        cancel_event = kwargs.pop("cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            return
         msgs = self.normalize_messages(messages)
         target_model = model or self.default_model
         fallback_model = self.fallback_model or self.RELIABLE_BACKUP_MODEL
@@ -274,7 +278,10 @@ class NimProvider(LLMProvider):
         RETRYABLE = (429, 500, 502, 503, 504)
         MAX_RETRIES = 3
 
+        emitted = False
+
         def _iter_stream(client: httpx.Client, active_model: str) -> Iterator[LLMStreamChunk]:
+            nonlocal emitted
             with client.stream(
                 "POST",
                 f"{self.base_url}/chat/completions",
@@ -283,6 +290,8 @@ class NimProvider(LLMProvider):
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
                     line = line.strip()
                     if not line or not line.startswith("data:"):
                         continue
@@ -296,19 +305,29 @@ class NimProvider(LLMProvider):
                         chunk_json = json.loads(data_str)
                         delta = chunk_json["choices"][0]["delta"].get("content", "")
                         if delta:
+                            emitted = True
                             yield LLMStreamChunk(
                                 delta=delta, model=active_model, provider=self.name, is_final=False
                             )
                     except json.JSONDecodeError:
                         continue
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with streaming_client(self.timeout, cancel_event) as client:
             last_err: httpx.HTTPStatusError | None = None
             for attempt in range(MAX_RETRIES):
+                if cancel_event is not None and cancel_event.is_set():
+                    return
                 try:
                     yield from _iter_stream(client, target_model)
+                    if not emitted and (cancel_event is None or not cancel_event.is_set()):
+                        if target_model != fallback_model:
+                            yield from _iter_stream(client, fallback_model)
+                        if not emitted:
+                            raise RuntimeError("NIM stream returned no reply text")
                     return
                 except httpx.HTTPStatusError as err:
+                    if emitted:
+                        raise
                     last_err = err
                     if err.response.status_code not in RETRYABLE:
                         raise
@@ -321,7 +340,11 @@ class NimProvider(LLMProvider):
                         MAX_RETRIES,
                         wait,
                     )
-                    time.sleep(wait)
+                    if cancel_event is not None:
+                        if cancel_event.wait(wait):
+                            return
+                    else:
+                        time.sleep(wait)
 
             # All retries exhausted — fall back once
             if last_err is not None:

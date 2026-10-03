@@ -15,6 +15,7 @@ def model_without_downloads(monkeypatch):
     model.transcribe.return_value = ([], SimpleNamespace(language="en", duration=1.0))
     monkeypatch.setattr(SpeechToText, "_load_model", lambda *_args: model)
     monkeypatch.setattr("raphael.audio.stt._preload_cuda_libraries", lambda: None)
+    monkeypatch.setattr("raphael.audio.stt.free_cuda_memory_mb", lambda: 8192)
     return model
 
 
@@ -23,6 +24,54 @@ def test_stt_initialization():
     stt = SpeechToText(model_size="tiny.en", device="cpu", compute_type="int8")
     assert stt.model_size == "tiny.en"
     assert stt.device == "cpu"
+
+
+@pytest.mark.parametrize("free_mb", [128, None])
+def test_training_load_retries_primary_without_allocating_another_cuda_model(
+    model_without_downloads, monkeypatch, free_mb,
+):
+    monkeypatch.setattr("raphael.audio.stt.free_cuda_memory_mb", lambda: free_mb)
+    factory = MagicMock(side_effect=AssertionError("Must not allocate under GPU pressure"))
+    monkeypatch.setattr("raphael.audio.stt.WhisperModel", factory)
+    model_without_downloads.transcribe.side_effect = [
+        decoding("And good.", -0.62), decoding("And include examples.", -0.1),
+    ]
+    stt = SpeechToText(device="cuda", retry_model="medium.en")
+    result = stt.transcribe_detailed(np.ones(16000, dtype=np.float32) * 0.1)
+    assert result["text"] == "And include examples."
+    assert result["retried"] and stt.device == "cuda"
+    factory.assert_not_called()
+
+
+def test_larger_retry_becomes_available_after_training_releases_vram(
+    model_without_downloads, monkeypatch,
+):
+    free_mb = [128]
+    monkeypatch.setattr("raphael.audio.stt.free_cuda_memory_mb", lambda: free_mb[0])
+    model_without_downloads.transcribe.return_value = decoding("And good.", -0.62)
+    larger = MagicMock()
+    larger.transcribe.return_value = decoding("And include examples.", -0.1)
+    factory = MagicMock(return_value=larger)
+    monkeypatch.setattr("raphael.audio.stt.WhisperModel", factory)
+    stt = SpeechToText(device="cuda", retry_model="medium.en")
+    audio = np.ones(16000, dtype=np.float32) * 0.1
+    assert stt.transcribe(audio) == "And good."
+    factory.assert_not_called()
+    free_mb[0] = 4096
+    assert stt.transcribe(audio) == "And include examples."
+    factory.assert_called_once()
+    assert stt._retry_model is None  # Do not retain the temporary training VRAM allocation.
+
+
+def test_identical_retry_reuses_primary_model(model_without_downloads, monkeypatch):
+    factory = MagicMock(side_effect=AssertionError("Duplicate model"))
+    monkeypatch.setattr("raphael.audio.stt.WhisperModel", factory)
+    model_without_downloads.transcribe.side_effect = [
+        decoding("And good.", -0.62), decoding("And include examples.", -0.1),
+    ]
+    stt = SpeechToText(model_size="medium.en", retry_model="medium.en", device="cuda")
+    assert stt.transcribe(np.ones(16000, dtype=np.float32) * 0.1) == "And include examples."
+    factory.assert_not_called()
 
 
 def test_stt_empty_audio():
