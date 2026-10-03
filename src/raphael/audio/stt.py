@@ -1,5 +1,6 @@
 """Speech-to-text conversion engine using faster-whisper with VAD and anti-hallucination."""
 
+import math
 import re
 import threading
 import time
@@ -9,6 +10,7 @@ from typing import Any
 import numpy as np
 from faster_whisper import WhisperModel
 
+from raphael.conversation import strip_wake_phrase
 from raphael.logging import get_logger
 
 logger = get_logger("audio.stt")
@@ -59,18 +61,24 @@ class SpeechToText:
         device: str = "auto",
         compute_type: str = "default",
         language: str = "en",
-        initial_prompt: str = (
-            "Hey Raphael. Conversational voice commands and questions. "
-            "Words like: open, close, search, play, pause, stop, set, remind, timer, "
-            "weather, time, "
-            "what, how, why, when, where, who, tell me, can you, could you, please, thanks."
-        ),
+        initial_prompt: str = "Raphael is the name of the assistant.",
+        min_confidence: float = 0.4,
+        retry_confidence: float = 0.55,
+        retry_model: str | None = None,
+        wake_phrase: str = "hey raphael",
     ) -> None:
+        if not 0.0 <= min_confidence <= 1.0 or not 0.0 <= retry_confidence <= 1.0:
+            raise ValueError("STT confidence thresholds must be between zero and one")
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
         self.language = language
         self.initial_prompt = initial_prompt
+        self.min_confidence = min_confidence
+        self.retry_confidence = retry_confidence
+        self.retry_model_size = retry_model or None
+        self.wake_phrase = wake_phrase
+        self._retry_model: WhisperModel | None = None
 
         self.model: WhisperModel | None = None
         self._ready = threading.Event()
@@ -85,6 +93,9 @@ class SpeechToText:
         """Background thread: load model then set the ready event."""
         try:
             self.model = self._load_model(self.model_size, self.device, self.compute_type)
+            logger.info(
+                "STT ready: %s (%s/%s)", self.model_size, self.device, self.compute_type
+            )
         except Exception as err:
             self._load_error = err
             logger.error("STT model failed to load: %s", err)
@@ -160,6 +171,8 @@ class SpeechToText:
         """Check if a segment appears to be a Whisper hallucination on noise/silence."""
         if not text:
             return True
+        if not any(character.isalnum() for character in text):
+            return True
         # High probability of silence / no speech
         if no_speech_prob > 0.65:
             return True
@@ -168,7 +181,7 @@ class SpeechToText:
             return True
         # Matches common hallucination regexes
         for pattern in _HALLUCINATION_PATTERNS:
-            if pattern.match(text):
+            if pattern.match(text) and (no_speech_prob > 0.35 or avg_logprob < -0.7):
                 return True
         return False
 
@@ -176,7 +189,7 @@ class SpeechToText:
         self,
         audio: np.ndarray | str | Path,
         language: str | None = None,
-        beam_size: int = 3,
+        beam_size: int = 5,
     ) -> str:
         """Transcribe an audio numpy array or file path to plain text."""
         result = self.transcribe_detailed(
@@ -190,16 +203,19 @@ class SpeechToText:
         self,
         audio: np.ndarray | str | Path,
         language: str | None = None,
-        beam_size: int = 3,
+        beam_size: int = 5,
     ) -> dict[str, Any]:
         """Transcribe audio with Silero VAD filtering and anti-hallucination safeguards."""
-        if isinstance(audio, np.ndarray) and audio.size == 0:
+        if isinstance(audio, np.ndarray) and (audio.size == 0 or not np.any(audio)):
             return {
                 "text": "",
                 "language": language or self.language,
                 "segments": [],
                 "duration": 0.0,
                 "latency": 0.0,
+                "confidence": 0.0,
+                "needs_repeat": False,
+                "retried": False,
             }
         # Wait for background model load if it hasn't finished yet
         if not self._ready.is_set():
@@ -224,7 +240,7 @@ class SpeechToText:
         target_lang = language or self.language
         start_t = time.time()
 
-        # Advanced decode options — deterministic greedy with beam search for maximum accuracy
+        # Decode deterministically without penalizing natural repetitions and corrections.
         decode_kwargs: dict[str, Any] = {
             "language": target_lang,
             "beam_size": beam_size,
@@ -237,90 +253,124 @@ class SpeechToText:
                 min_silence_duration_ms=200,
                 speech_pad_ms=400,  # Extra padding so word edges aren't clipped
             ),
-            "repetition_penalty": 1.3,
-            "no_repeat_ngram_size": 3,
+            "repetition_penalty": 1.0,
+            "no_repeat_ngram_size": 0,
             "compression_ratio_threshold": 2.2,  # Tighter: discard garbled/repetition-heavy output
             "log_prob_threshold": -0.7,  # Tighter: drop low-confidence segments
             "no_speech_threshold": 0.55,  # Slightly tighter silence filter
+            "word_timestamps": True,
         }
+
+        def decode(options: dict[str, Any], model: WhisperModel | None = None) -> dict[str, Any]:
+            """Consume lazy inference and expose quality without treating it as certainty."""
+            generator, info = (model or self.model).transcribe(audio_input, **options)
+            segments_list = []
+            text_parts = []
+            raw_parts = []
+            suspected_speech = False
+            for segment in generator:
+                cleaned = segment.text.strip()
+                if not cleaned:
+                    continue
+                suspected_speech |= segment.no_speech_prob < 0.65
+                if segment.no_speech_prob < 0.65:
+                    raw_parts.append(cleaned)
+                if self._is_hallucination(cleaned, segment.no_speech_prob, segment.avg_logprob):
+                    continue
+                if getattr(segment, "compression_ratio", 0.0) > 2.4:
+                    continue
+                words = getattr(segment, "words", None) or []
+                word_score = sum(word.probability for word in words) / len(words) if words else 1.0
+                score = float(min(math.exp(min(0.0, segment.avg_logprob)), word_score))
+                text_parts.append(cleaned)
+                segments_list.append(
+                    {
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": cleaned,
+                        "avg_logprob": segment.avg_logprob,
+                        "no_speech_prob": segment.no_speech_prob,
+                        "confidence": score,
+                    }
+                )
+            weight = sum(len(segment["text"]) for segment in segments_list)
+            confidence = (
+                sum(segment["confidence"] * len(segment["text"]) for segment in segments_list)
+                / weight
+                if weight
+                else 0.0
+            )
+            return {
+                "text": " ".join(text_parts).strip(),
+                "raw_text": " ".join(raw_parts).strip(),
+                "language": getattr(info, "language", target_lang),
+                "segments": segments_list,
+                "duration": getattr(info, "duration", 0.0),
+                "confidence": confidence,
+                "suspected_speech": suspected_speech,
+            }
 
         try:
-            segments_generator, info = self.model.transcribe(audio_input, **decode_kwargs)
-            segments_list = []
-            text_parts = []
-            for segment in segments_generator:
-                cleaned_text = segment.text.strip()
-                if not cleaned_text:
-                    continue
-                if self._is_hallucination(
-                    cleaned_text, segment.no_speech_prob, segment.avg_logprob
-                ):
-                    logger.debug(
-                        "Filtered out hallucination: '%s' (no_speech_prob=%.2f, logprob=%.2f)",
-                        cleaned_text,
-                        segment.no_speech_prob,
-                        segment.avg_logprob,
-                    )
-                    continue
-
-                text_parts.append(cleaned_text)
-                segments_list.append(
-                    {
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": cleaned_text,
-                        "avg_logprob": segment.avg_logprob,
-                        "no_speech_prob": segment.no_speech_prob,
-                    }
-                )
+            result = decode(decode_kwargs)
         except Exception as err:
-            logger.warning(
-                "Runtime error during Whisper transcription (%s). Retrying on CPU fallback.",
-                err,
-            )
-            self.model = WhisperModel(
-                model_size_or_path=self.model_size,
-                device="cpu",
-                compute_type="int8",
-            )
+            logger.warning("Whisper transcription failed (%s). Retrying on CPU/int8.", err)
+            self.model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
             self.device = "cpu"
             self.compute_type = "int8"
-            segments_generator, info = self.model.transcribe(audio_input, **decode_kwargs)
-            segments_list = []
-            text_parts = []
-            for segment in segments_generator:
-                cleaned_text = segment.text.strip()
-                if not cleaned_text:
-                    continue
-                if self._is_hallucination(
-                    cleaned_text, segment.no_speech_prob, segment.avg_logprob
-                ):
-                    continue
-                text_parts.append(cleaned_text)
-                segments_list.append(
-                    {
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": cleaned_text,
-                        "avg_logprob": segment.avg_logprob,
-                        "no_speech_prob": segment.no_speech_prob,
-                    }
-                )
+            result = decode(decode_kwargs)
 
-        full_text = " ".join(text_parts).strip()
-        elapsed = time.time() - start_t
-
-        logger.debug(
-            "Transcribed %.1fs audio in %.2fs: '%s'",
-            getattr(info, "duration", 0.0),
-            elapsed,
-            full_text,
+        duration = (
+            audio_input.size / 16000 if isinstance(audio_input, np.ndarray) else result["duration"]
         )
-
-        return {
-            "text": full_text,
-            "language": getattr(info, "language", target_lang),
-            "segments": segments_list,
-            "duration": getattr(info, "duration", 0.0),
-            "latency": elapsed,
-        }
+        retried = False
+        clear_greeting = (
+            bool(result["text"])
+            and result["confidence"] >= self.min_confidence
+            and not strip_wake_phrase(result["text"], self.wake_phrase)
+        )
+        if not clear_greeting and result["suspected_speech"] and result["confidence"] < max(
+            self.min_confidence, self.retry_confidence
+        ):
+            # Spend extra decoding work only on ambiguous short utterances.
+            if duration <= 12.0:
+                retried = True
+                logger.info(
+                    "Retrying unclear STT (confidence=%.2f) with %s...",
+                    result["confidence"], self.retry_model_size or self.model_size,
+                )
+                try:
+                    if self.retry_model_size and self._retry_model is None:
+                        self._retry_model = WhisperModel(
+                            self.retry_model_size,
+                            device=self.device,
+                            compute_type=self.compute_type,
+                        )
+                    candidate = decode(
+                        {
+                            **decode_kwargs,
+                            "beam_size": max(8, beam_size),
+                            "patience": 1.5,
+                            "max_new_tokens": 128,
+                        },
+                        model=self._retry_model,
+                    )
+                    if candidate["confidence"] > result["confidence"]:
+                        result = candidate
+                except Exception as err:
+                    logger.warning("STT quality retry failed: %s", err)
+        result["needs_repeat"] = (
+            result.pop("suspected_speech") and result["confidence"] < self.min_confidence
+        )
+        if result["needs_repeat"]:
+            # Keep diagnostics but never pass the uncertain text off as a command.
+            result["text"] = ""
+        result["retried"] = retried
+        result["latency"] = time.time() - start_t
+        logger.debug(
+            "STT confidence=%.2f retry=%s repeat=%s latency=%.2fs",
+            result["confidence"],
+            retried,
+            result["needs_repeat"],
+            result["latency"],
+        )
+        return result

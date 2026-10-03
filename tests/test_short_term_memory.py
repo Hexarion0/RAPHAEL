@@ -62,7 +62,7 @@ def test_sliding_context_window_trimming(temp_store: MemoryStore):
     assert manager.get_total_turn_count() == 20
 
     # Active messages should only contain the system prompt + latest 4 turns
-    messages = manager.get_active_messages(system_prompt="Base System")
+    messages = manager.get_active_messages(system_prompt="Base System", limit=4)
     assert len(messages) == 5  # 1 system + 4 turns
     assert messages[1].content == "User turn 8"
     assert messages[2].content == "Assistant turn 8"
@@ -125,10 +125,35 @@ def test_clear_session(temp_store: MemoryStore):
     assert len(manager.get_active_messages(system_prompt="Base")) == 1
 
 
+def test_fallback_summary_preserves_claim_sources(temp_store: MemoryStore):
+    """An assistant's unsupported claim must stay attributed to the assistant."""
+    manager = ConversationManager(
+        store=temp_store,
+        session_id="sources",
+        max_turns=2,
+        auto_summarize_threshold=2,
+    )
+    manager.add_turn(role="user", content="The project started five days ago.")
+    manager.add_turn(role="assistant", content="The database proves it started three days ago.")
+    manager.add_turn(role="user", content="That is not the project's start date.")
+    manager.add_turn(role="assistant", content="Thanks for correcting me.")
+
+    summary = manager.summarize_older_turns()
+
+    assert "User said: The project started five days ago." in summary
+    assert "Assistant said: The database proves it started three days ago." in summary
+    assert manager.get_summary() == summary
+
+
 def test_background_summary_does_not_delay_or_duplicate_requests(temp_store):
     import threading
 
-    manager = ConversationManager(store=temp_store, max_turns=2, auto_summarize_threshold=2)
+    manager = ConversationManager(
+        store=temp_store,
+        max_turns=2,
+        auto_summarize_threshold=2,
+        summary_interval=1,
+    )
     for index in range(4):
         manager.add_turn("user", f"Topic {index}")
     entered, release = threading.Event(), threading.Event()
@@ -209,7 +234,12 @@ def test_summary_is_incremental_bounded_and_resumes_after_restart(temp_store):
 def test_clearing_during_summary_does_not_recreate_context(temp_store):
     import threading
 
-    manager = ConversationManager(store=temp_store, max_turns=2, auto_summarize_threshold=2)
+    manager = ConversationManager(
+        store=temp_store,
+        max_turns=2,
+        auto_summarize_threshold=2,
+        summary_interval=1,
+    )
     for index in range(4):
         manager.add_turn("user", f"old topic {index}")
     entered, release = threading.Event(), threading.Event()
@@ -259,7 +289,12 @@ def test_legacy_summary_cursor_prevents_repeated_request(temp_store):
 def test_background_summary_with_in_memory_store():
     store = MemoryStore(":memory:")
     try:
-        manager = ConversationManager(store=store, max_turns=2, auto_summarize_threshold=2)
+        manager = ConversationManager(
+            store=store,
+            max_turns=2,
+            auto_summarize_threshold=2,
+            summary_interval=1,
+        )
         for index in range(4):
             manager.add_turn("user", f"topic {index}")
         assert manager.schedule_summary()
@@ -268,3 +303,65 @@ def test_background_summary_with_in_memory_store():
         assert manager.get_total_turn_count() == 4
     finally:
         store.close()
+
+
+def test_background_summary_waits_for_new_turn_batch(temp_store):
+    manager = ConversationManager(
+        store=temp_store,
+        max_turns=2,
+        auto_summarize_threshold=2,
+        summary_interval=6,
+    )
+    router = MagicMock()
+    router.send.return_value = LLMResponse(content="Summary", model="test", provider="test")
+    for index in range(7):
+        manager.add_turn("user", f"Turn {index}")
+    assert not manager.schedule_summary(router)  # Only five older turns.
+    router.send.assert_not_called()
+    manager.add_turn("user", "Turn seven")
+    assert manager.schedule_summary(router)
+    manager._summary_thread.join(timeout=2)
+    assert router.send.call_count == 1
+    manager.add_turn("user", "One more turn")
+    assert not manager.schedule_summary(router)
+
+
+def test_real_router_uses_summary_purpose_even_for_code_transcript(temp_store):
+    from raphael.config import get_settings
+    from raphael.providers.manager import ProviderManager
+    from raphael.providers.router import ModelRouter
+
+    providers = MagicMock(spec=ProviderManager)
+    for name in ("nim", "groq", "openrouter", "ollama"):
+        provider = MagicMock()
+        provider.is_configured.return_value = name == "nim"
+        setattr(providers, name, provider)
+    providers.send_with_fallback.return_value = LLMResponse(
+        content="Discussed Python code.",
+        model="test",
+        provider="test",
+    )
+    router = ModelRouter(providers)
+    manager = ConversationManager(store=temp_store, max_turns=2, auto_summarize_threshold=2)
+    for _ in range(4):
+        manager.add_turn("user", "Refactor this Python function and debug the SQL error")
+    assert manager.summarize_older_turns(router) == "Discussed Python code."
+    arguments = providers.send_with_fallback.call_args.kwargs
+    assert arguments["model"] == get_settings().providers.nim_model
+    assert arguments["max_tokens"] == 150
+
+
+def test_pending_turns_remain_available_while_summary_is_batched(temp_store):
+    manager = ConversationManager(
+        store=temp_store,
+        max_turns=4,
+        auto_summarize_threshold=4,
+        summary_interval=6,
+    )
+    for index in range(9):
+        manager.add_turn("user", f"Pending topic {index}")
+    assert not manager.schedule_summary()
+    messages = manager.get_active_messages("Persona")
+    assert len(messages) == 10
+    assert messages[1].content == "Pending topic 0"
+    assert len(manager.get_active_messages("Persona", limit=4)) == 5

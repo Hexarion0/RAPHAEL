@@ -611,7 +611,7 @@ Start with SQLite. Do not introduce a vector database until it is actually neede
 ### 2.3 Long-Term Memory
 
 #### 2.3.1
-- [ ] Store explicit facts
+- [x] Store explicit facts (`remember ...` plus recognized names, favorites, and project dates)
 
 #### 2.3.2
 - [ ] Allow RAPHAEL to propose memories rather than save them silently
@@ -627,13 +627,16 @@ favorite game = CS2
 ```
 
 #### 2.3.3
-- [ ] Retrieve relevant memories
+- [x] Retrieve relevant memories (ranked words and aliases; embedding recall remains future work)
 
 #### 2.3.4
-- [ ] Inject relevant memories into context
+- [x] Inject relevant memories into context
 
 #### 2.3.5
-- [ ] Handle conflicting memories
+- [x] Handle conflicting memories for keyed names, favorites, and project dates
+
+Corrections update one current record and retain bounded revisions. Arbitrary
+unstructured notes still need explicit clarification when they conflict.
 
 Example:
 
@@ -646,11 +649,17 @@ favorite game = Y
 ```
 
 #### 2.3.6
-- [ ] Add memory deletion ("Forget that.")
+- [x] Add memory deletion ("Forget that.")
+
+Deleted facts' known wording and values are suppressed in model context across
+restarts. Conversation archives remain stored; this is not full archive erasure.
 
 ---
 
 ### 2.4 Restart Test
+
+Automated temporary-database tests cover fact restoration and correction after
+restart. The checklist below remains the live voice acceptance test.
 
 - [ ] Teach RAPHAEL a fact
 - [ ] Close RAPHAEL

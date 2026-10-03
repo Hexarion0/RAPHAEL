@@ -42,8 +42,8 @@ class SystemSnapshot:
     ram_percent: float = 0.0
     gpu: GpuInfo = field(default_factory=GpuInfo)
     wake_word: str = "hey raphael"
-    stt_model: str = "medium.en (cuda float16)"
-    tts_engine: str = "edge_tts"
+    stt_model: str = "Not provided"
+    tts_engine: str = "Not provided"
     active_providers: list[str] = field(default_factory=list)
     memory_db: str = "data/raphael.db"
     capabilities: list[str] = field(default_factory=list)
@@ -170,7 +170,6 @@ def get_system_snapshot(settings: Settings | None = None) -> SystemSnapshot:
         f"Multi-tier AI routing ({', '.join([p.split()[0] for p in providers]) or 'Local'})",
         f"Persistent SQLite memory store ({cfg.memory.db_path})",
         "Hardware & system health telemetry inspection",
-        "Application and desktop task automation",
     ]
 
     return SystemSnapshot(
@@ -201,12 +200,13 @@ def generate_system_prompt(
     memories: list[str] | None = None,
 ) -> str:
     """Generate a rich, context-aware system agenda and advanced persona prompt for RAPHAEL."""
-    from raphael.persona import build_advanced_persona
+    from raphael.persona import build_advanced_persona, load_persona_preferences
 
-    snap = snapshot or get_system_snapshot(settings=settings)
+    cfg = settings or get_settings()
+    snap = snapshot or get_system_snapshot(settings=cfg)
     now_str = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
 
-    gpu_name = snap.gpu.name if snap.gpu.available else "Integrated Graphics"
+    gpu_name = snap.gpu.name if snap.gpu.available else "Unknown GPU"
 
     return build_advanced_persona(
         user_name=snap.user_name,
@@ -221,4 +221,9 @@ def generate_system_prompt(
         ram_used_gb=snap.ram_used_gb,
         ram_total_gb=snap.ram_total_gb,
         recalled_memories=memories,
+        stt_model=snap.stt_model,
+        tts_engine=snap.tts_engine,
+        memory_db=snap.memory_db,
+        preferred_name=cfg.raphael_preferred_name,
+        persona_preferences=load_persona_preferences(cfg.raphael_persona_file),
     )

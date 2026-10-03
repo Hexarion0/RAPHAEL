@@ -60,3 +60,46 @@ def test_audio_device_indices_and_names_from_env(tmp_path):
     direct = AudioConfig(input_device=" 4 ", output_device="")
     assert direct.input_device == 4
     assert direct.output_device is None
+
+
+def test_stt_quality_thresholds_are_exposed_and_validated():
+    import pytest
+    from pydantic import ValidationError
+
+    settings = Settings(_env_file=None, stt_min_confidence=0.3, stt_retry_confidence=0.6)
+    assert settings.audio.stt_min_confidence == 0.3
+    assert settings.audio.stt_retry_confidence == 0.6
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, stt_min_confidence=1.1)
+
+
+def test_persona_file_can_be_configured_or_disabled():
+    with patch.dict(os.environ, {}, clear=True):
+        assert Settings(_env_file=None).raphael_persona_file == "persona.txt"
+    for path in ("data/custom-persona.txt", ""):
+        with patch.dict(os.environ, {"RAPHAEL_PERSONA_FILE": path}, clear=True):
+            assert Settings(_env_file=None).raphael_persona_file == path
+
+
+def test_wake_sensitivity_settings_reach_audio_config():
+    with patch.dict(
+        os.environ, {"WAKE_MIN_RMS": "0.009", "WAKE_WINDOW_SECONDS": "4"}, clear=True
+    ):
+        settings = Settings(_env_file=None)
+    assert settings.audio.wake_min_rms == 0.009
+    assert settings.audio.wake_window_seconds == 4.0
+
+
+def test_ambient_and_pause_settings_reach_audio_config():
+    with patch.dict(
+        os.environ,
+        {
+            "AMBIENT_LISTENING": "true", "AMBIENT_FOLLOWUP_SECONDS": "30",
+            "UTTERANCE_PAUSE_GRACE_SECONDS": "1.2",
+        },
+        clear=True,
+    ):
+        settings = Settings(_env_file=None)
+    assert settings.audio.ambient_listening
+    assert settings.audio.ambient_followup_seconds == 30
+    assert settings.audio.utterance_pause_grace_seconds == 1.2

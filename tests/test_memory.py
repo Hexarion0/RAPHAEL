@@ -105,6 +105,25 @@ def test_delete_by_pattern(temp_store: MemoryStore):
     assert temp_store.count_memories() == 1
 
 
+@pytest.mark.parametrize("query", ["you", ""])
+def test_recall_excludes_conversation_summaries_before_limit(temp_store, query):
+    """A newer broad-match summary must not displace the user's saved fact."""
+    fact = MemoryItem(content="You prefer patient explanations", memory_type=MemoryType.FACT)
+    temp_store.save_memory(fact)
+    archived = MemoryItem(
+        content="You requested a cold commanding tone", memory_type=MemoryType.CONVERSATION,
+        source="auto_summarizer", metadata={"session_id": "desktop_session"},
+    )
+    temp_store.save_memory(archived)
+
+    recalled = temp_store.search_memories(
+        query, limit=1, exclude_types=(MemoryType.CONVERSATION,),
+    )
+
+    assert [memory.id for memory in recalled] == [fact.id]
+    assert temp_store.get_memory(archived.id).content == archived.content
+
+
 def test_conversation_turns_persistence(temp_store: MemoryStore):
     """Verify storing and retrieving multi-turn conversation history."""
     session_a = "session_123"

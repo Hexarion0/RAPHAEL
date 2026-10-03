@@ -34,6 +34,11 @@ and private audio out of reports.
 2. Say “Hey Raphael.” Expect an acknowledgement, then ask a short question.
    Repeat with “Hey Raphael, what time is it?” in one utterance. Verify the start
    of the command is retained and one reply plays.
+   Wait for `Wake keyword spotter ready` before starting. Test ten wake attempts
+   at normal volume, ten quieter attempts, and several slower greetings. Record
+   successful attempts and wake latency, along with `WAKE_MIN_RMS` and
+   `WAKE_WINDOW_SECONDS`. Leave the PC humming without speaking for one minute
+   and record any false wakes; increase the minimum RMS if needed.
 3. Ask a follow-up without the wake phrase. Check that the reply uses the earlier
    context. Pause briefly mid-sentence and verify the recorder does not cut you
    off; adjust `UTTERANCE_SILENCE_SECONDS` if needed.
@@ -49,6 +54,16 @@ and private audio out of reports.
    Say “Goodbye” and verify follow-up ends. Say the wake phrase again, then press
    Ctrl+C. Confirm the process exits and the microphone can be opened again on a
    fresh launch.
+8. Launch with `./scripts/launch_raphael_gpu.sh --ambient`. Address RAPHAEL directly,
+   then ask a related follow-up without her name. Talk to someone else and verify
+   she stays quiet and no background turn or personal fact appears in SQLite.
+   Check that `Raphael, stop listening` returns to wake-word mode and `Hey Raphael,
+   listen continuously` enables ambient mode again. Interrupt playback by name.
+9. Pause for 1.2 seconds mid-sentence, then finish the thought; expect one complete
+   turn. Resume speaking during reply generation and verify the old reply is
+   suppressed. Check small wording mistakes against recent context; uncertain
+   names, dates, quantities, and negations should get a clarification, not a saved
+   inferred correction. Repeat with the actual PC hum and record missed/false wakes.
 
 ## Recorded validation — 2026-10-02
 

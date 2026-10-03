@@ -88,3 +88,80 @@ def test_router_send(mock_manager):
     response = router.send(messages)
     assert response.content == "Mocked response"
     mock_manager.send_with_fallback.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    ["So what's the time right now?", "What's today's date?", "What is 2 + 2?"],
+)
+def test_clock_variants_and_math_are_simple(mock_manager, prompt):
+    assert ModelRouter(mock_manager).classify_complexity(prompt)[0] == ComplexityLevel.SIMPLE
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "What is Python?",
+        "Explain what an API does",
+        "Compare tea and coffee",
+        " ".join(["Tell me about your day"] * 15),
+    ],
+)
+def test_keywords_and_length_alone_do_not_select_ultra(mock_manager, prompt):
+    assert ModelRouter(mock_manager).classify_complexity(prompt)[0] == ComplexityLevel.MEDIUM
+
+
+@pytest.mark.parametrize("purpose", ["summary", "speech_gate"])
+def test_background_tasks_ignore_code_history_and_strong_override(mock_manager, purpose):
+    router = ModelRouter(mock_manager)
+    prompt = "/strong Previous dialogue: refactor this Python architecture " * 40
+    decision = router.route(prompt, purpose=purpose)
+    assert decision.complexity == ComplexityLevel.SIMPLE
+    assert decision.override_applied is None
+    router.send([ChatMessage("user", prompt)], purpose=purpose)
+    assert mock_manager.send_with_fallback.call_args.kwargs["model"] != (
+        "nvidia/nemotron-3-ultra-550b-a55b"
+    )
+
+
+def test_continue_preserves_complex_request_route(mock_manager):
+    router = ModelRouter(mock_manager)
+    router.send(
+        [
+            ChatMessage("user", "Refactor this Python function"),
+            ChatMessage("assistant", "Here is the first part."),
+            ChatMessage("user", "Continue."),
+        ]
+    )
+    assert mock_manager.send_with_fallback.call_args.kwargs["preferred_provider"] == "nim"
+
+
+def test_greeting_does_not_hide_complex_request(mock_manager):
+    router = ModelRouter(mock_manager)
+    assert (
+        router.classify_complexity("Hello Raphael, design a distributed architecture")[0]
+        == ComplexityLevel.COMPLEX
+    )
+
+
+def test_override_prefix_requires_whole_command(mock_manager):
+    router = ModelRouter(mock_manager)
+    assert router.classify_complexity("/fastfood ideas")[2] is None
+    assert router._clean_override_prefixes([ChatMessage("user", "/fastfood ideas")])[0].content == (
+        "/fastfood ideas"
+    )
+
+
+def test_repeated_continuations_and_stream_keep_original_route(mock_manager):
+    router = ModelRouter(mock_manager)
+    messages = [
+        ChatMessage("user", "Refactor this Python function"),
+        ChatMessage("assistant", "Part one."),
+        ChatMessage("user", "Continue."),
+        ChatMessage("assistant", "Part two."),
+        ChatMessage("user", "Go on."),
+    ]
+    router.send(messages)
+    assert mock_manager.send_with_fallback.call_args.kwargs["preferred_provider"] == "nim"
+    list(router.stream(messages))
+    assert mock_manager.stream_with_fallback.call_args.kwargs["preferred_provider"] == "nim"

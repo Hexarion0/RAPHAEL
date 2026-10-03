@@ -162,3 +162,290 @@ has no `/dev/snd`. Follow [the manual release checks](release-checks.md) on the
 assistant's target machine before tagging a release. Earlier recorded service and
 callback timings above are historical audit evidence, not measurements from this
 pass.
+
+## STT Follow-Up — 2026-10-02
+
+The supplied live log demonstrates wake detection, replies, follow-up, barge-in,
+and clean Ctrl+C shutdown with zero dropped frames, but also shows incorrect
+transcripts. It does not establish complete hardware acceptance or reliable STT.
+The user reported PC hum without competing speech.
+
+Utterance decoding now uses a short name hint instead of a command-word list,
+removes repetition suppression, preserves confident short responses, and skips
+inference for digital silence. Wake spotting uses speech filtering and rejects
+low-confidence/no-speech segments. Local recognition configuration was changed
+from cached `base.en` to cached `small.en`, with beam size five; CPU/int8 and the
+selected Piper voice were retained.
+
+Both configurations recovered all words of five generated Piper phrases in a
+synthetic comparison. CPU decoding took about 0.6 seconds per phrase with the
+previous base configuration and 1.6–2.0 seconds with the small configuration.
+This clean generated speech comparison does not prove improved recognition of
+the user's voice. Both tiny and small models produced no transcript for a
+synthetic 60 Hz hum through speech filtering. Live retesting is still required.
+
+## Wake Handoff and STT Quality — 2026-10-03
+
+A new live report showed "Hey Raphael" being transcribed as "I hate Raphael."
+The listener had been re-transcribing wake audio after the keyword detector
+already recognized it. Keyword recognition now returns word timing in original
+sample coordinates; the listener removes the greeting audio, retaining commands
+spoken immediately afterward. Sample coordinates account for asynchronous
+inference delay. A known greeting is used only for that initial utterance;
+follow-up speech is not relabeled. Mentioning Raphael inside a sentence no longer
+counts as a greeting. Recent audio retention was increased to three seconds.
+
+STT now reports word/segment quality, retries ambiguous short utterances once
+with a wider beam (optionally a separately loaded larger model), and requests a
+repeat when quality remains low. The listener carries the quality result to the
+CLI, which does not contact a provider for unclear speech. The larger retry model
+is cached after first use and adds memory and latency. Local configuration keeps
+small.en on CPU/int8 with beam five and uses cached medium.en only for retries.
+
+Generated speech plus synthetic 60 Hz hum confirmed that a bare wake leaves no
+command after timestamp trimming. The medium model took roughly 5–10 seconds
+for the tested CPU decodes, so it was not selected for every utterance. This is
+synthetic evidence only: word timing, quality scores, and larger models cannot
+guarantee correct transcription of the user's voice. Live retesting remains
+necessary.
+
+The separate keyword spotter was also upgraded from tiny.en to base.en, exposed
+as `WAKE_STT_MODEL`. The first synthetic end-to-end run with tiny missed one
+wake-and-command greeting. Bare wakes with no post-greeting speech now bypass
+command decoding entirely, including brief leftover greeting sounds.
+
+Additional synthetic runs exposed imperfect wake word-end timestamps: decoding
+only a greeting's leftover syllable could still invent a confident command.
+For a snapshot recognized as a bare greeting, the whole recognized snapshot is
+now consumed as the greeting. Only newer audio can become a command; snapshots
+containing a recognized command still use word timing to retain that command.
+Regression coverage checks this distinction, preservation of genuine negative
+statements, one-use greeting context, repeat requests without provider calls,
+retry model reuse/failure, and rejection of repetition-heavy hallucinations.
+
+Final validation for this pass: 153 unit tests passed, with three integration
+tests excluded; Ruff and whitespace checks passed. With generated Alan voice
+speech plus synthetic hum, the final handoff returned no command for a bare
+wake, retained the question in a combined wake-and-command utterance, and retained
+a genuine "I hate Raphael" statement following a greeting. Normal small-model
+command decoding took about 2.2–2.3 seconds in that final sample. These checks are
+not a substitute for live recognition on the user's microphone.
+
+## Personalized Persona and GPU Setup — 2026-10-03
+
+The user selected a warm, mature, confident feminine companion, with casual
+flirting, light wit, focused task assistance, patience during frustration, and
+direct explanations of inconsistencies. English is the default language and
+the local preferred name is hexarion. `RAPHAEL_PREFERRED_NAME` keeps that preference
+separate from the desktop login; the persona remains in Python for now.
+
+The prompt uses configured speech engines and database paths. It treats unknown
+GPU telemetry as unknown hardware, distinguishes user corrections from unsupported
+assistant claims, and does not promise successful actions or saved facts without
+application confirmation. Historical replies and summaries cannot establish the
+persona's tone or invent log evidence. Summary generation now preserves claim
+sources, including role labels in its local fallback.
+
+The sandbox hid the host GPU. A host check identified a GTX 1660 SUPER with 6 GB
+VRAM and CUDA support in the installed CTranslate2 library. Initial GPU decoding
+failed because cuBLAS was not on the library search path. Required CUDA 12/cuDNN 9
+libraries already exist in the Piper training environment. The new
+`scripts/launch_raphael_gpu.sh` exposes existing local libraries before Python
+starts, without installing libraries or starting training. Local STT is configured
+for small.en with CUDA/int8_float16; the wake spotter and Piper playback remain on
+CPU, and the existing larger retry setting is retained.
+
+Using those libraries, a GPU check loaded the cached small.en model in 1.38 seconds
+and decoded 3.13 seconds of generated Amy speech in 1.21 seconds. The transcript
+was "Hey Rafael, what did we build together?" for a phrase spoken as "Hey Raphael.
+What did we build together?" This confirms functioning GPU decoding, rather than
+live microphone accuracy. Active training can change available VRAM.
+
+Validation: 160 unit tests passed, with three integration tests excluded; Ruff,
+whitespace checks, launcher shell syntax, and launcher CLI help passed. Prompt
+adherence and the trained voice's naturalness still need a live conversation check.
+
+## Legacy Persona Carryover — 2026-10-03
+
+A live retest loaded the new prompt but still produced the old commanding style.
+The runtime reused `desktop_session`, which contained eight assistant turns with
+cold catchphrases. Those recent replies were replayed as assistant examples despite
+the prompt's warnings. Broad keyword memory recall also admitted conversation
+summaries from other sessions into the personal-fact block.
+
+The companion persona now uses a versioned desktop context. Legacy turns and
+summaries remain archived in the database; saved facts and preferences remain
+available. General recall excludes conversation summaries before applying its
+result limit, while the active context retains its own recent turns and summary
+across restarts. Future persona replacements can advance the context version.
+
+Two live NIM checks with isolated synthetic legacy history returned warm replies
+to "What do you do?" and "What's good?" in 1.56 and 4.16 seconds. These checks used
+the configured conversational model, rather than mocked provider responses, and
+did not record audio or write to the user's database. Regression tests verify the
+actual CLI request excludes legacy replies and summaries, includes saved facts,
+and leaves both archived and current conversations in SQLite.
+
+## Dated Project Memory and Practical Answers — 2026-10-03
+
+The next live run stopped using the commanding tone but substituted relationship
+monologues for development questions. It also reused an old saved fact saying
+"this is the third day" without its recorded timestamp. The September 28
+correction had existed in chat history rather than a durable project anchor.
+
+The user's latest explicit correction is now saved locally as a project start
+date of September 28, 2026. Recall includes recorded timestamps, always includes
+the bounded project-anchor set, and calculates elapsed calendar days and the
+inclusive development-day number. On October 3 this yields five elapsed days
+and development day six. Original facts and conversation archives remain stored.
+
+The practical companion revision uses a new context version, keeps the user's
+chosen warmth and casual playfulness, and prioritizes concrete answers for dates,
+code, and features. Positive examples clarify the likely feature/future speech
+confusion and continuation requests without substituting philosophical monologues.
+
+Final live NIM checks answered development day six from September 28, interpreted
+"add a future" as a possible feature request with a concrete project-journal idea,
+and gave the current time directly. Their request latencies were 10.17, 1.14,
+and 5.24 seconds; provider latency remains variable. Validation: 168 unit tests
+passed with three integration tests excluded, plus Ruff and whitespace checks.
+Regression tests cover restart recall, informal queries, relative-fact timestamps,
+deduplication, and invalid or future date anchors.
+
+## Structured Memory and Task Routing — 2026-10-03
+
+The complex-model request following a simple clock answer was the background
+summarizer. Its transcript was classified as ordinary conversation, where code
+keywords or length selected the complex model. Summaries now explicitly use the
+economical route and log their task purpose. They wait for six new older messages
+instead of requesting a summary after each exchange. A bounded pending tail keeps
+context available between summary batches. Standalone clock/date questions are
+answered locally and do not schedule provider work.
+
+Conversation routing now reserves the complex model for implementation/debugging,
+architecture, embedded code, or explicit overrides. Generic technical explanations
+and long conversations use the normal model. Repeated continuation requests keep
+the original task's route. Missing providers fall back to configured providers.
+Cloud latency still depends on the configured provider and model.
+
+The application recognizes conservative direct statements about preferred names,
+favorites, project start dates, and first commit dates. Corrections update a unique
+key atomically, retaining up to twenty previous revisions. Existing structured
+metadata is indexed additively; arbitrary historical notes are not automatically
+converted into structured facts. Questions, uncertain statements, third-party
+claims, and unrelated follow-ups do not silently overwrite a fact. Explicit
+`remember ...` remains available for other notes. Recall ranks words and aliases,
+excluding conversation summaries; it does not provide embedding search.
+
+Forgetting removes the selected durable fact and persists suppression patterns for
+its wording, values, and revisions. Those patterns redact recent history, prior
+summaries, and new summary inputs sent to providers, including after restart.
+Explicit relearning clears suppression for that key. Archived chats remain stored,
+and unrecognized paraphrases are outside this literal suppression mechanism.
+
+Validation: 215 unit tests passed, with three integration tests excluded. Coverage
+includes the actual CLI local clock/fact callbacks, economical summary routing,
+batched context, concurrent keyed updates, restart recall, ambiguous corrections,
+and forgetting. Ruff and whitespace checks passed. No live microphone acceptance
+test or provider latency measurement was performed for this change.
+
+## Natural Conversation and Wake Capture — 2026-10-03
+
+The built-in prompt and editable personality preferences now favor expressive,
+relaxed conversation, varied phrasing, and warmth in short answers. They reduce
+canned reassurance, unsolicited advice, repeated closing questions, and routine
+AI disclaimers while retaining truthful identity and capability instructions.
+Examples cover casual greetings, tone feedback, frustration, and practical help.
+
+The Whisper wake path previously required RMS above 0.012, included quiet speech
+in its noise estimate, and retained only 1.5 seconds. The minimum is now configurable
+with a default of 0.006, and candidate speech no longer raises its own noise floor.
+The default buffer retains three seconds. After 160 ms below the speech gate, a
+pending greeting gets one complete snapshot even within the normal check interval.
+Reset clears that pending check. Punctuation such as `Hey, Raphael` is accepted
+without broadening detection to unrelated mentions. Startup logs explicitly report
+when the CPU keyword model is ready. VAD and transcript-confidence filtering remain.
+
+Validation: 230 unit tests passed, three integrations excluded; Ruff and whitespace
+checks passed. Synthetic tests cover quieter frame submission, complete slower
+greetings, background hum below the gate, punctuation, and reset behavior. These
+tests establish capture behavior, not recognition accuracy on the user's voice.
+The release checklist includes repeated normal/quiet wakes and actual PC-hum trials;
+live microphone acceptance remains pending.
+
+## Ambient Listening, Pauses, and Speech Interpretation — 2026-10-03
+
+`--ambient` starts optional continuous speech capture; `AMBIENT_LISTENING` also
+enables it with a normal listening launch. The installed local Silero VAD accepts
+arbitrary audio frame sizes through a 512-sample accumulator, detects onset, and
+drives recording without relying solely on volume. Startup and voice toggles
+require 16 kHz for this path. "Raphael, stop listening" returns to wake-word mode;
+"Hey Raphael, listen continuously" enables ambient capture again.
+
+Direct addresses are accepted locally. Recent possible follow-ups are judged on
+the economical `speech_gate` route using the last interaction, including local
+acknowledgements. The default window is twenty seconds, measured from when speech
+began so a long follow-up can still qualify. Uncertain intent, provider errors,
+invalid JSON, and explicit family addresses default to silence. Model confidence
+is an estimate, not a calibrated probability or speaker-identification result.
+
+Background excerpts are bounded to six entries of 300 characters, expire after
+ninety seconds on context access, and remain in RAM. They can enter the configured
+provider's prompt but are not directly saved as chat or personal facts. Inferred
+ambient follow-ups cannot mutate durable memory; direct addresses and reliable
+recognition are required. This implementation has no speaker enrollment,
+diarization, or acoustic echo cancellation. Ambient transcription pauses during
+TTS playback; direct wake detection remains available for interruption.
+
+Recording adds 0.8 seconds of pause grace to the existing one-second silence
+setting. Short utterances use a 0.12-second minimum and initial silence waits up
+to five seconds. A resumed-speech onset during processing invalidates the earlier
+generation, preserves onset audio, and suppresses its stale response before
+playback or assistant-history writes. In-flight provider requests still run to
+completion; the next queued utterance may wait for that request.
+
+The prompt interprets small STT wording mistakes with recent context but preserves
+the original transcript. Failed recognition retains diagnostic raw text for
+address decisions and still asks for a repeat; inferred wording is not passed to
+memory saving. Ambiguous names, dates, numbers, negation, and commands require
+clarification rather than an invented correction.
+
+Validation: 258 unit tests passed with three integration tests excluded. Ruff,
+whitespace, and CLI help checks passed. A local smoke check using the actual
+installed Silero model rejected silence and a quiet synthetic 120 Hz hum.
+Regression tests cover ambient mode switching, background persistence boundaries,
+follow-up judgments and failures, original transcript preservation, thinking
+pauses, resumed speech, stale responses, VAD framing, and playback exclusion.
+Live microphone/speaker trials and real-world intended-listener accuracy remain
+pending; reproduction steps are in `docs/release-checks.md`.
+
+## Ambient Silence Diagnosis and Wake Replay — 2026-10-03
+
+The reported run logged recordings ending but no transcription or reply. INFO
+logging previously hid ambient rejections, STT completion, quality retries, and
+transcripts superseded by a new recording. Those stages now log explicit metadata
+and reply/silence reasons without dumping background text. DEBUG exposes raw
+candidates when deliberately enabled. Command STT also announces readiness.
+
+The onset pre-roll increased from 240 ms to 800 ms. Local replay through the old
+capture path lost "Hey" in one of four existing wake samples. Another defect
+discarded a direct address when fresh speech arrived during STT. The old reply
+still stays cancelled, but a confidently decoded direct address may enter the
+bounded temporary ambient context so a following utterance can be judged. No old
+command or fact is executed or saved by that observation callback.
+
+Recognizable low-confidence speech retains a raw diagnostic transcript even when
+the command text is rejected; ambient mode can ask for a repeat when clearly
+addressed. Bare wake phrases above the existing acceptance threshold skip the
+larger decoder retry. The original configured CUDA check spent 6.83 seconds on
+its first retry; ambiguous commands still retain the stronger retry path.
+Exact fenced JSON from the ambient judge is accepted, while other invalid results
+remain silent and produce a diagnostic warning.
+
+Validation: 266 unit tests passed, three integrations excluded; Ruff and whitespace
+checks passed. Four existing local wake recordings were replayed through actual
+Silero capture and configured `small.en` CUDA/int8_float16 STT with beam size five.
+All four yielded "Hey Raphael" and a direct-address decision, without quality
+retry; decode times were 0.94, 0.83, 0.77, and 0.89 seconds. These are transcription
+times, excluding recording pauses and model startup. No audio was uploaded or new
+audio recorded. Live microphone/device verification remains pending.

@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from raphael.conversation import is_direct_address, strip_wake_phrase
 from raphael.logging import get_logger
 
 logger = get_logger("audio.wake")
@@ -35,12 +36,19 @@ class WakeWordDetector:
         threshold: float = 0.5,
         cooldown_seconds: float = 1.0,
         enable_whisper_spotter: bool = True,
+        spotter_model_size: str = "base.en",
+        min_rms: float = 0.006,
+        window_seconds: float = 3.0,
     ) -> None:
+        if not 0.0 < min_rms <= 0.05 or not 1.5 <= window_seconds <= 5.0:
+            raise ValueError("Wake sensitivity or audio window is out of range")
         self.wake_phrase = wake_phrase.lower()
         self.threshold = threshold
         self.cooldown_seconds = cooldown_seconds
         self.last_trigger_time = 0.0
         self.enable_whisper_spotter = enable_whisper_spotter
+        self.spotter_model_size = spotter_model_size
+        self.min_rms = min_rms
 
         model_paths = self._resolve_model_paths(models)
 
@@ -62,15 +70,18 @@ class WakeWordDetector:
             self.model = None
             self.available_models = []
 
-        # Sliding audio buffer for keyword spotting (1.5 seconds at 16kHz = 24,000 samples)
-        self._sliding_buffer: deque = deque(maxlen=24000)
+        # Retain a complete slower greeting while asynchronous inference runs.
+        self._sliding_buffer: deque = deque(maxlen=round(window_seconds * 16000))
         self._speech_frames_count = 0
+        self._speech_pending = False
+        self._last_speech_sample = 0
         self._last_spotter_check = 0.0
-        self._ambient_rms = 0.01
+        self._ambient_rms = min_rms / 2
         self._spotter_model: Any = None
         self._spotter_lock = threading.Lock()
         self._generation = 0
-        self._spotter_result: tuple[int, str] | None = None
+        self._spotter_result: tuple[int, str, int | None] | None = None
+        self._samples_seen = 0
         self._spotter_requests: queue.Queue = queue.Queue(maxsize=1)
         self._spotter_stop = threading.Event()
         self._spotter_thread: threading.Thread | None = None
@@ -83,11 +94,12 @@ class WakeWordDetector:
 
         return Model(wakeword_model_paths=paths)
 
-    @staticmethod
-    def _load_spotter_model():
+    def _load_spotter_model(self):
         from faster_whisper import WhisperModel
 
-        return WhisperModel("tiny.en", device="cpu", compute_type="int8", cpu_threads=2)
+        return WhisperModel(
+            self.spotter_model_size, device="cpu", compute_type="int8", cpu_threads=2
+        )
 
     def start(self) -> None:
         """Load and run the keyword spotter separately from incoming audio."""
@@ -111,12 +123,15 @@ class WakeWordDetector:
         try:
             if self._spotter_model is None:
                 self._spotter_model = self._load_spotter_model()
+            logger.info(
+                "Wake keyword spotter ready: %s (cpu/int8)", self.spotter_model_size
+            )
         except Exception as err:
             logger.error("Failed to initialize keyword spotter: %s", err)
             return
         while not self._spotter_stop.is_set():
             try:
-                generation, audio = self._spotter_requests.get(timeout=0.1)
+                generation, audio, snapshot_end = self._spotter_requests.get(timeout=0.1)
             except queue.Empty:
                 continue
             try:
@@ -127,18 +142,66 @@ class WakeWordDetector:
                     audio,
                     language="en",
                     beam_size=1,
-                    initial_prompt=self.wake_phrase,
-                    without_timestamps=True,
+                    initial_prompt="Raphael is the name of the assistant.",
+                    word_timestamps=True,
                     condition_on_previous_text=False,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 200, "speech_pad_ms": 200},
+                    no_speech_threshold=0.6,
+                    max_new_tokens=32,
                 )
-                text = " ".join(segment.text.strip() for segment in segments)
+                accepted = [
+                    segment
+                    for segment in segments
+                    if getattr(segment, "no_speech_prob", 0.0) < 0.6
+                    and getattr(segment, "avg_logprob", 0.0) >= -1.0
+                    and getattr(segment, "compression_ratio", 0.0) <= 2.4
+                ]
+                text = " ".join(segment.text.strip() for segment in accepted)
+                # Only a leading greeting may be trimmed. In 'what's up Raphael',
+                # the question precedes the name and must remain in the recording.
+                wake_end = (
+                    self._wake_word_end(accepted)
+                    if strip_wake_phrase(text, self.wake_phrase) != text.strip() else None
+                )
+                wake_sample = (
+                    snapshot_end - audio.size + round(wake_end * 16000)
+                    if wake_end is not None
+                    else None
+                )
+                if text and not strip_wake_phrase(text, self.wake_phrase):
+                    # A snapshot recognized as only the greeting is already consumed.
+                    # Re-decoding its final syllables can invent a separate command.
+                    wake_sample = snapshot_end
                 with self._spotter_lock:
                     if generation == self._generation and not self._spotter_stop.is_set():
-                        self._spotter_result = (generation, text)
+                        self._spotter_result = (generation, text, wake_sample)
             except Exception as err:
                 logger.debug("Keyword spotter failed: %s", err)
             finally:
                 self._spotter_requests.task_done()
+
+    def _wake_word_end(self, segments: list[Any]) -> float | None:
+        """Locate the end of the detected greeting in original audio coordinates."""
+        words = [word for segment in segments for word in (getattr(segment, "words", None) or [])]
+        if not words:
+            return None
+        text = "".join(word.word for word in words)
+        configured = re.search(re.escape(self.wake_phrase), text, re.IGNORECASE)
+        matches = [configured] if configured else []
+        if "raphael" in self.wake_phrase:
+            matches.extend(
+                match for pattern in self.WAKE_PATTERNS if (match := pattern.search(text))
+            )
+        if not matches:
+            return None
+        match = min(matches, key=lambda candidate: candidate.start())
+        position = 0
+        for word in words:
+            position += len(word.word)
+            if position >= match.end():
+                return float(word.end)
+        return None
 
     @staticmethod
     def _resolve_model_paths(models: list[str] | None) -> list[str]:
@@ -176,8 +239,32 @@ class WakeWordDetector:
         """Check whether the detector is currently within cooldown protection."""
         return (time.time() - self.last_trigger_time) < self.cooldown_seconds
 
+    def poll(self) -> dict[str, Any] | None:
+        """Consume completed keyword inference without adding audio or waiting for it."""
+        if self.is_in_cooldown():
+            return None
+        with self._spotter_lock:
+            completed = self._spotter_result
+            self._spotter_result = None
+        if completed is None:
+            return None
+        generation, transcription, wake_sample = completed
+        if generation != self._generation or not is_direct_address(transcription, self.wake_phrase):
+            return None
+        now = time.time()
+        self.last_trigger_time = now
+        self.reset(set_cooldown=True)
+        result = {
+            "model": "whisper_keyword", "score": 1.0, "timestamp": now,
+            "text": transcription, "wake_phrase": self.wake_phrase,
+        }
+        if wake_sample is not None:
+            result["wake_tail_samples"] = max(0, self._samples_seen - wake_sample)
+        return result
+
     def process_frame(self, audio_chunk: np.ndarray) -> dict[str, Any] | None:
         """Feed a mono 16kHz audio frame and check for wake word triggers."""
+        self._samples_seen += audio_chunk.size
         if audio_chunk.size == 0 or self.is_in_cooldown():
             return None
 
@@ -209,44 +296,41 @@ class WakeWordDetector:
                         "timestamp": now,
                     }
 
-        # Consume completed inference without ever waiting for Whisper.
-        with self._spotter_lock:
-            completed = self._spotter_result
-            self._spotter_result = None
-        if completed is not None:
-            generation, transcription = completed
-            if generation == self._generation:
-                patterns = self.WAKE_PATTERNS if "raphael" in self.wake_phrase else []
-                matched = self.wake_phrase in transcription.lower() or any(
-                    pattern.search(transcription) for pattern in patterns
-                )
-                if matched:
-                    self.last_trigger_time = now
-                    self.reset(set_cooldown=True)
-                    return {
-                        "model": "whisper_keyword",
-                        "score": 1.0,
-                        "timestamp": now,
-                        "text": transcription,
-                    }
+        if trigger := self.poll():
+            return trigger
 
         if self.enable_whisper_spotter:
             self._sliding_buffer.extend(float_chunk)
             rms = float(np.sqrt(np.mean(float_chunk**2))) if float_chunk.size else 0.0
-            if rms < 0.03:
-                self._ambient_rms = 0.95 * self._ambient_rms + 0.05 * rms
-            if rms > max(0.012, self._ambient_rms * 1.5):
-                self._speech_frames_count += 1
+            gate = max(self.min_rms, self._ambient_rms * 1.5)
+            if rms > gate:
+                self._speech_frames_count = min(3, self._speech_frames_count + 1)
+                self._last_speech_sample = self._samples_seen
+                if self._speech_frames_count >= 2:
+                    self._speech_pending = True
             else:
-                self._speech_frames_count = max(0, self._speech_frames_count - 1)
+                # Only update the noise floor with frames below the speech gate.
+                # Quiet speech must not teach the detector to reject itself.
+                self._ambient_rms = 0.95 * self._ambient_rms + 0.05 * rms
+                self._speech_frames_count = 0
+            final_snapshot = (
+                self._speech_pending
+                and self._samples_seen - self._last_speech_sample >= 2560
+            )
             if (
                 self._spotter_model is not None
-                and self._speech_frames_count >= 2
+                and (self._speech_frames_count >= 2 or final_snapshot)
                 and len(self._sliding_buffer) >= 8000
-                and now - self._last_spotter_check >= 0.25
+                and (final_snapshot or now - self._last_spotter_check >= 0.25)
             ):
                 self._last_spotter_check = now
-                request = (self._generation, np.array(self._sliding_buffer, dtype=np.float32))
+                if final_snapshot:
+                    self._speech_pending = False
+                request = (
+                    self._generation,
+                    np.array(self._sliding_buffer, dtype=np.float32),
+                    self._samples_seen,
+                )
                 # Keep only the newest pending snapshot if inference falls behind.
                 try:
                     self._spotter_requests.put_nowait(request)
@@ -276,6 +360,8 @@ class WakeWordDetector:
             self._spotter_result = None
         self._sliding_buffer.clear()
         self._speech_frames_count = 0
+        self._speech_pending = False
+        self._last_speech_sample = 0
         self._last_spotter_check = time.time()
         if set_cooldown:
             self.last_trigger_time = time.time()

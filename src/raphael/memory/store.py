@@ -1,6 +1,7 @@
 """SQLite persistence engine for short-term conversation context and long-term memories."""
 
 import json
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -91,6 +92,27 @@ class MemoryStore:
                     "CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);"
                 )
                 conn.execute(
+                    "CREATE TABLE IF NOT EXISTS memory_keys ("
+                    "fact_key TEXT PRIMARY KEY, memory_id INTEGER UNIQUE NOT NULL "
+                    "REFERENCES memories(id) ON DELETE CASCADE);"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS forgotten_memories ("
+                    "fact_key TEXT PRIMARY KEY, patterns_json TEXT NOT NULL);"
+                )
+                # Index existing structured project anchors without removing any records.
+                for row in conn.execute(
+                    "SELECT id, metadata_json FROM memories ORDER BY updated_at DESC;"
+                ).fetchall():
+                    metadata = json.loads(row["metadata_json"])
+                    key = metadata.get("fact_key")
+                    if key:
+                        scope = metadata.get("project") or metadata.get("scope", "user")
+                        conn.execute(
+                            "INSERT OR IGNORE INTO memory_keys VALUES (?, ?);",
+                            (f"{scope}:{key}", row["id"]),
+                        )
+                conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_conv_session "
                     "ON conversation_turns(session_id, timestamp);"
                 )
@@ -166,27 +188,171 @@ class MemoryStore:
                 return None
             return self._row_to_memory(row)
 
+    def get_fact(self, key: str) -> MemoryItem | None:
+        """Retrieve the current value of a stable, namespaced fact key."""
+        with self._lock:
+            row = (
+                self._get_connection()
+                .execute(
+                    "SELECT m.* FROM memories m JOIN memory_keys k ON k.memory_id=m.id "
+                    "WHERE k.fact_key=?;",
+                    (key,),
+                )
+                .fetchone()
+            )
+            return self._row_to_memory(row) if row else None
+
+    def upsert_fact(self, key: str, item: MemoryItem) -> int:
+        """Atomically replace a keyed fact, retaining its original record and revision history."""
+        scope, fact_key = key.split(":", 1)
+        with self._lock:
+            conn = self._get_connection()
+            with conn:
+                conn.execute("BEGIN IMMEDIATE;")
+                row = conn.execute(
+                    "SELECT m.* FROM memories m JOIN memory_keys k ON k.memory_id=m.id "
+                    "WHERE k.fact_key=?;",
+                    (key,),
+                ).fetchone()
+                observed = datetime.now(timezone.utc).isoformat()
+                metadata = {
+                    **item.metadata,
+                    "scope": scope,
+                    "fact_key": fact_key,
+                    "observed_at": observed,
+                }
+                if scope == "raphael":
+                    metadata["project"] = "raphael"
+                if row:
+                    old = self._row_to_memory(row)
+                    revisions = old.metadata.get("revisions", [])
+                    if old.content != item.content:
+                        revisions = [
+                            *revisions,
+                            {
+                                "content": old.content,
+                                "value": old.metadata.get("value"),
+                                "recorded_at": old.updated_at.isoformat(),
+                            },
+                        ][-20:]
+                    metadata["revisions"] = revisions
+                    memory_id = row["id"]
+                    conn.execute(
+                        "UPDATE memories SET content=?, memory_type=?, source=?, confidence=?, "
+                        "updated_at=?, metadata_json=? WHERE id=?;",
+                        (
+                            item.content,
+                            item.memory_type.value,
+                            item.source,
+                            item.confidence,
+                            observed,
+                            json.dumps(metadata),
+                            memory_id,
+                        ),
+                    )
+                else:
+                    cursor = conn.execute(
+                        "INSERT INTO memories (content,memory_type,source,confidence,"
+                        "created_at,updated_at,metadata_json) VALUES (?,?,?,?,?,?,?);",
+                        (
+                            item.content,
+                            item.memory_type.value,
+                            item.source,
+                            item.confidence,
+                            observed,
+                            observed,
+                            json.dumps(metadata),
+                        ),
+                    )
+                    memory_id = cursor.lastrowid
+                    conn.execute("INSERT INTO memory_keys VALUES (?, ?);", (key, memory_id))
+                conn.execute("DELETE FROM forgotten_memories WHERE fact_key=?;", (key,))
+                item.id = memory_id
+                return memory_id
+
+    def forget_memories(self, items: list[MemoryItem]) -> int:
+        """Remove selected durable facts and suppress their values in replayed history."""
+        with self._lock:
+            conn = self._get_connection()
+            deleted = 0
+            with conn:
+                for item in items:
+                    key_row = conn.execute(
+                        "SELECT fact_key FROM memory_keys WHERE memory_id=?;",
+                        (item.id,),
+                    ).fetchone()
+                    key = key_row["fact_key"] if key_row else f"record:{item.id}"
+                    patterns = [item.content]
+                    value = item.metadata.get("value")
+                    if value is None:
+                        description = re.match(
+                            r"^(?:i (?:have|own|use|prefer)|my \w+ is)\s+"
+                            r"(?:(?:a|an|the)\s+)?(.+)$",
+                            item.content,
+                            re.I,
+                        )
+                        if description:
+                            value = description.group(1)
+                    if isinstance(value, str) and len(value.strip()) >= 3:
+                        patterns.append(value.strip())
+                    # Include replaced values so older summaries cannot restore a prior value.
+                    patterns.extend(
+                        revision["content"] for revision in item.metadata.get("revisions", [])
+                    )
+                    patterns.extend(
+                        revision["value"]
+                        for revision in item.metadata.get("revisions", [])
+                        if isinstance(revision.get("value"), str) and len(revision["value"]) >= 3
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO forgotten_memories VALUES (?, ?);",
+                        (key, json.dumps(patterns)),
+                    )
+                    deleted += conn.execute(
+                        "DELETE FROM memories WHERE id=?;",
+                        (item.id,),
+                    ).rowcount
+            return deleted
+
+    def redact_forgotten(self, text: str) -> str:
+        """Mask forgotten values before sending archived or recent text to a model."""
+        with self._lock:
+            rows = (
+                self._get_connection()
+                .execute("SELECT patterns_json FROM forgotten_memories;")
+                .fetchall()
+            )
+        for row in rows:
+            for pattern in json.loads(row["patterns_json"]):
+                text = re.sub(
+                    r"(?<!\w)" + re.escape(pattern) + r"(?!\w)",
+                    "[forgotten fact]",
+                    text,
+                    flags=re.IGNORECASE,
+                )
+        return text
+
     def search_memories(
         self,
         query: str,
         memory_type: MemoryType | None = None,
         limit: int = 10,
+        *,
+        exclude_types: tuple[MemoryType, ...] = (),
     ) -> list[MemoryItem]:
         """Search memory content using case-insensitive substring / keyword matching."""
         with self._lock:
             conn = self._get_connection()
             words = [w.strip() for w in query.split() if w.strip()]
-            if not words:
-                return self.list_memories(memory_type=memory_type, limit=limit)
-
             sql = "SELECT * FROM memories WHERE "
             conditions: list[str] = []
             params: list[Any] = []
 
             # Match any keyword in content
-            content_clauses = ["content LIKE ?" for _ in words]
-            conditions.append(f"({' OR '.join(content_clauses)})")
-            params.extend([f"%{w}%" for w in words])
+            if words:
+                content_clauses = ["content LIKE ?" for _ in words]
+                conditions.append(f"({' OR '.join(content_clauses)})")
+                params.extend([f"%{w}%" for w in words])
 
             if memory_type is not None:
                 type_val = (
@@ -195,7 +361,12 @@ class MemoryStore:
                 conditions.append("memory_type = ?")
                 params.append(type_val)
 
-            sql += " AND ".join(conditions)
+            if exclude_types:
+                placeholders = ", ".join("?" for _ in exclude_types)
+                conditions.append(f"memory_type NOT IN ({placeholders})")
+                params.extend(memory_type.value for memory_type in exclude_types)
+
+            sql += " AND ".join(conditions) if conditions else "1 = 1"
             sql += " ORDER BY updated_at DESC LIMIT ?;"
             params.append(limit)
 
@@ -335,11 +506,15 @@ class MemoryStore:
             if "last_turn_id" not in summary.metadata:
                 count = summary.metadata.get("older_turns_count", 0)
                 if isinstance(count, int) and count > 0:
-                    turn = self._get_connection().execute(
-                        "SELECT id FROM conversation_turns WHERE session_id = ? "
-                        "ORDER BY id ASC LIMIT 1 OFFSET ?;",
-                        (session_id, count - 1),
-                    ).fetchone()
+                    turn = (
+                        self._get_connection()
+                        .execute(
+                            "SELECT id FROM conversation_turns WHERE session_id = ? "
+                            "ORDER BY id ASC LIMIT 1 OFFSET ?;",
+                            (session_id, count - 1),
+                        )
+                        .fetchone()
+                    )
                     if turn:
                         summary.metadata["last_turn_id"] = turn["id"]
             return summary

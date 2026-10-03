@@ -89,6 +89,11 @@ class AudioConfig(BaseModel):
         default=2.0,
         description="Cooldown seconds after wake trigger",
     )
+    wake_stt_model: str = Field(default="base.en")
+    wake_min_rms: float = Field(default=0.006, gt=0.0, le=0.05)
+    wake_window_seconds: float = Field(default=3.0, ge=1.5, le=5.0)
+    ambient_listening: bool = Field(default=False)
+    ambient_followup_seconds: float = Field(default=20.0, ge=2, le=120)
     wake_models: list[str] = Field(
         default_factory=list,
         description="openWakeWord model names/paths (empty = Whisper-only keyword spotter)",
@@ -110,7 +115,11 @@ class AudioConfig(BaseModel):
         description="Primary language code for STT transcription",
     )
     stt_beam_size: int = Field(default=3, ge=1, le=10)
+    stt_min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
+    stt_retry_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+    stt_retry_model: str | None = Field(default=None)
     utterance_silence_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
+    utterance_pause_grace_seconds: float = Field(default=0.8, ge=0, le=3)
     tts_engine: str = Field(
         default="auto",
         description=("TTS engine: auto (follow voice), piper, edge_tts, or fish_speech"),
@@ -183,6 +192,11 @@ class Settings(BaseSettings):
     raphael_env: str = Field(default="development")
     raphael_log_level: str = Field(default="INFO")
     raphael_debug: bool = Field(default=False)
+    raphael_preferred_name: str = Field(default="")
+    raphael_persona_file: str = Field(
+        default="persona.txt",
+        description="Optional UTF-8 personality preferences file; empty disables it",
+    )
 
     # Provider settings
     nim_api_key: SecretStr | None = Field(default=None)
@@ -201,12 +215,21 @@ class Settings(BaseSettings):
     wake_word: str = Field(default="hey raphael")
     wake_threshold: float = Field(default=0.5)
     wake_cooldown: float = Field(default=2.0)
+    wake_stt_model: str = Field(default="base.en")
+    wake_min_rms: float = Field(default=0.006, gt=0.0, le=0.05)
+    wake_window_seconds: float = Field(default=3.0, ge=1.5, le=5.0)
+    ambient_listening: bool = Field(default=False)
+    ambient_followup_seconds: float = Field(default=20.0, ge=2, le=120)
     stt_model: str = Field(default="base.en")
     stt_device: str = Field(default="cpu")
     stt_compute_type: str = Field(default="int8")
     stt_language: str = Field(default="en")
     stt_beam_size: int = Field(default=3, ge=1, le=10)
+    stt_min_confidence: float = Field(default=0.4, ge=0.0, le=1.0)
+    stt_retry_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+    stt_retry_model: str | None = Field(default=None)
     utterance_silence_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
+    utterance_pause_grace_seconds: float = Field(default=0.8, ge=0, le=3)
     tts_engine: str = Field(default="auto")
     tts_voice: str = Field(default="mommy")
     tts_speed: float = Field(default=1.0)
@@ -272,12 +295,21 @@ class Settings(BaseSettings):
             wake_word=self.wake_word,
             wake_threshold=self.wake_threshold,
             wake_cooldown=self.wake_cooldown,
+            wake_stt_model=self.wake_stt_model,
+            wake_min_rms=self.wake_min_rms,
+            wake_window_seconds=self.wake_window_seconds,
+            ambient_listening=self.ambient_listening,
+            ambient_followup_seconds=self.ambient_followup_seconds,
             stt_model=self.stt_model,
             stt_device=self.stt_device,
             stt_compute_type=self.stt_compute_type,
             stt_language=self.stt_language,
             stt_beam_size=self.stt_beam_size,
+            stt_min_confidence=self.stt_min_confidence,
+            stt_retry_confidence=self.stt_retry_confidence,
+            stt_retry_model=self.stt_retry_model,
             utterance_silence_seconds=self.utterance_silence_seconds,
+            utterance_pause_grace_seconds=self.utterance_pause_grace_seconds,
             tts_engine=self.tts_engine,
             tts_voice=self.tts_voice,
             tts_speed=self.tts_speed,

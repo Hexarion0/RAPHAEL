@@ -43,3 +43,157 @@ def test_stt_silence_audio():
     silent_audio = np.zeros(16000, dtype=np.float32)
     result = stt.transcribe(silent_audio)
     assert isinstance(result, str)
+
+
+@pytest.mark.parametrize("text", ["Bye.", "Okay.", "Thank you.", "Oh.", "You."])
+def test_confident_short_speech_is_not_discarded(text):
+    assert not SpeechToText._is_hallucination(text, no_speech_prob=0.01, avg_logprob=-0.1)
+    assert SpeechToText._is_hallucination(text, no_speech_prob=0.5, avg_logprob=-0.9)
+
+
+def test_decode_preserves_spoken_corrections(model_without_downloads):
+    model_without_downloads.transcribe.return_value = (
+        [
+            SimpleNamespace(
+                text="No, no. Five days ago.",
+                start=0,
+                end=2,
+                avg_logprob=-0.1,
+                no_speech_prob=0.01,
+            )
+        ],
+        SimpleNamespace(language="en", duration=2),
+    )
+    stt = SpeechToText()
+    assert stt.transcribe(np.ones(32000, dtype=np.float32) * 0.1) == "No, no. Five days ago."
+    options = model_without_downloads.transcribe.call_args.kwargs
+    assert options["beam_size"] == 5
+    assert options["repetition_penalty"] == 1.0
+    assert options["no_repeat_ngram_size"] == 0
+    assert options["condition_on_previous_text"] is False
+    assert "Words like:" not in options["initial_prompt"]
+
+
+def test_digital_silence_does_not_invoke_model(model_without_downloads):
+    stt = SpeechToText()
+    assert stt.transcribe(np.zeros(16000, dtype=np.float32)) == ""
+    model_without_downloads.transcribe.assert_not_called()
+
+
+def decoding(text, logprob, word_probability=1.0):
+    return (
+        [
+            SimpleNamespace(
+                text=text,
+                start=0.0,
+                end=1.0,
+                avg_logprob=logprob,
+                no_speech_prob=0.01,
+                words=[SimpleNamespace(probability=word_probability)],
+            )
+        ],
+        SimpleNamespace(language="en", duration=1.0),
+    )
+
+
+def test_ambiguous_short_speech_uses_one_stronger_decode(model_without_downloads):
+    model_without_downloads.transcribe.side_effect = [
+        decoding("I hate Raphael.", -0.95),
+        decoding("Hey Raphael.", -0.15),
+    ]
+    result = SpeechToText().transcribe_detailed(np.ones(16000, dtype=np.float32) * 0.1)
+    assert result["text"] == "Hey Raphael."
+    assert result["retried"] and not result["needs_repeat"]
+    assert model_without_downloads.transcribe.call_count == 2
+    assert model_without_downloads.transcribe.call_args.kwargs["beam_size"] == 8
+
+
+def test_uncertain_transcription_is_not_returned_as_command(model_without_downloads):
+    model_without_downloads.transcribe.return_value = decoding("I hate Raphael.", -1.2)
+    result = SpeechToText().transcribe_detailed(np.ones(16000, dtype=np.float32) * 0.1)
+    assert result["text"] == ""
+    assert result["needs_repeat"] and result["retried"]
+    assert model_without_downloads.transcribe.call_count == 2
+
+
+def test_rejected_speech_keeps_raw_text_for_a_repeat_not_a_command(model_without_downloads):
+    model_without_downloads.transcribe.return_value = decoding("Hey Raphael.", -1.5)
+    result = SpeechToText().transcribe_detailed(np.ones(16000, dtype=np.float32) * 0.1)
+    assert result["text"] == ""
+    assert result["raw_text"] == "Hey Raphael."
+    assert result["needs_repeat"]
+
+
+def test_clear_bare_wake_does_not_load_a_large_retry_model(model_without_downloads, monkeypatch):
+    model_without_downloads.transcribe.return_value = decoding("Hey Raphael.", -0.63)
+    factory = MagicMock(side_effect=AssertionError("Unnecessary medium model load"))
+    monkeypatch.setattr("raphael.audio.stt.WhisperModel", factory)
+    result = SpeechToText(retry_model="medium.en").transcribe_detailed(
+        np.ones(16000, dtype=np.float32) * 0.1
+    )
+    assert result["text"] == "Hey Raphael."
+    assert not result["retried"] and not result["needs_repeat"]
+    model_without_downloads.transcribe.assert_called_once()
+    factory.assert_not_called()
+
+
+def test_word_confidence_can_trigger_retry(model_without_downloads):
+    model_without_downloads.transcribe.side_effect = [
+        decoding("Unclear command", -0.1, 0.3),
+        decoding("Clear command", -0.1, 0.9),
+    ]
+    result = SpeechToText().transcribe_detailed(np.ones(16000, dtype=np.float32) * 0.1)
+    assert result["text"] == "Clear command"
+    assert result["retried"]
+
+
+def test_long_uncertain_speech_does_not_repeat_expensive_inference(model_without_downloads):
+    model_without_downloads.transcribe.return_value = decoding("Unclear command", -1.2)
+    result = SpeechToText().transcribe_detailed(np.ones(16000 * 13, dtype=np.float32) * 0.1)
+    assert result["needs_repeat"] and not result["retried"]
+    model_without_downloads.transcribe.assert_called_once()
+
+
+def test_confident_negative_statement_is_preserved(model_without_downloads):
+    model_without_downloads.transcribe.return_value = decoding("I hate Raphael.", -0.1)
+    assert SpeechToText().transcribe(np.ones(16000, dtype=np.float32) * 0.1) == "I hate Raphael."
+    model_without_downloads.transcribe.assert_called_once()
+
+
+def test_larger_retry_model_is_loaded_only_for_ambiguous_speech(
+    model_without_downloads, monkeypatch
+):
+    larger = MagicMock()
+    larger.transcribe.return_value = decoding("Correct command", -0.1)
+    factory = MagicMock(return_value=larger)
+    monkeypatch.setattr("raphael.audio.stt.WhisperModel", factory)
+    stt = SpeechToText(retry_model="medium.en")
+    model_without_downloads.transcribe.return_value = decoding("Clear command", -0.1)
+    audio = np.ones(16000, dtype=np.float32) * 0.1
+    assert stt.transcribe(audio) == "Clear command"
+    factory.assert_not_called()
+    model_without_downloads.transcribe.return_value = decoding("Wrong command", -1.2)
+    assert stt.transcribe(audio) == "Correct command"
+    assert stt.transcribe(audio) == "Correct command"
+    factory.assert_called_once_with("medium.en", device="auto", compute_type="default")
+    assert larger.transcribe.call_count == 2
+
+
+def test_failed_larger_retry_still_requests_repeat(model_without_downloads, monkeypatch):
+    model_without_downloads.transcribe.return_value = decoding("Unclear command", -1.2)
+    monkeypatch.setattr(
+        "raphael.audio.stt.WhisperModel", MagicMock(side_effect=RuntimeError("offline"))
+    )
+    result = SpeechToText(retry_model="medium.en").transcribe_detailed(
+        np.ones(16000, dtype=np.float32) * 0.1
+    )
+    assert result["needs_repeat"] and result["text"] == ""
+    assert result["raw_text"] == "Unclear command"
+
+
+def test_repetition_hallucination_requests_repeat(model_without_downloads):
+    result = decoding('la ' * 40, -0.1)
+    result[0][0].compression_ratio = 5.0
+    model_without_downloads.transcribe.return_value = result
+    detailed = SpeechToText().transcribe_detailed(np.ones(16000, dtype=np.float32) * 0.1)
+    assert detailed['needs_repeat'] and detailed['text'] == ''

@@ -45,6 +45,11 @@ def test_farewell_words_in_questions_do_not_end_session(text):
         ("hey raphael. Hey Raphael, what's the time?", "what's the time?"),
         ("Raphaelite art", "Raphaelite art"),
         ("Tell me about Raphael.", "Tell me about Raphael."),
+        ("So Raphael, what's on your mind?", "what's on your mind?"),
+        ("Well, um, hey Raphael, what's the time?", "what's the time?"),
+        ("So what's good Raphael?", "So what's good Raphael?"),
+        ("So what's good?", "So what's good?"),
+        ("So I hate Raphael.", "So I hate Raphael."),
     ],
 )
 def test_wake_phrase_is_removed_with_its_punctuation(text, expected):
@@ -57,3 +62,4 @@ def test_custom_wake_phrase_is_removed():
     from raphael.conversation import strip_wake_phrase
 
     assert strip_wake_phrase("Hey Jarvis. Open the browser.", "hey jarvis") == "Open the browser."
+    assert strip_wake_phrase("So computer, open the browser.", "so computer") == "open the browser."

@@ -1,5 +1,7 @@
 """Voice utterance recorder with silence / VAD energy cutoff."""
 
+from collections.abc import Callable
+
 import numpy as np
 
 from raphael.logging import get_logger
@@ -18,6 +20,8 @@ class VoiceRecorder:
         min_speech_duration_seconds: float = 0.25,
         max_duration_seconds: float = 30.0,
         initial_silence_timeout: float = 3.5,
+        pause_grace_seconds: float = 0.0,
+        speech_detector: Callable[[np.ndarray], bool] | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.silence_threshold_rms = silence_threshold_rms
@@ -25,6 +29,8 @@ class VoiceRecorder:
         self.min_speech_duration_seconds = min_speech_duration_seconds
         self.max_duration_seconds = max_duration_seconds
         self.initial_silence_timeout = initial_silence_timeout
+        self.pause_grace_seconds = pause_grace_seconds
+        self.speech_detector = speech_detector
 
         self._buffer: list[np.ndarray] = []
         self._is_recording = False
@@ -63,7 +69,12 @@ class VoiceRecorder:
         rms = self.calculate_rms(frame)
 
         # Check speech presence
-        if rms >= self.silence_threshold_rms:
+        is_speech = (
+            self.speech_detector(frame)
+            if self.speech_detector is not None
+            else rms >= self.silence_threshold_rms
+        )
+        if is_speech:
             if not self._speech_started:
                 self._speech_started = True
                 self._speech_start_time = now
@@ -73,7 +84,7 @@ class VoiceRecorder:
             # Silence observed
             if self._speech_started:
                 silence_elapsed = now - self._last_speech_time
-                if silence_elapsed >= self.silence_duration_seconds:
+                if silence_elapsed >= self.silence_duration_seconds + self.pause_grace_seconds:
                     speech_duration = self._last_speech_time - self._speech_start_time
                     if speech_duration < self.min_speech_duration_seconds:
                         # Transient sound (< min_speech_duration) — reset and keep listening
@@ -101,7 +112,7 @@ class VoiceRecorder:
                     return False
 
         # Hard timeout check
-        if (now - self._start_time) >= self.max_duration_seconds:
+        if now >= self.max_duration_seconds:
             logger.info(
                 "Maximum recording duration reached (%.1fs). Concluding utterance.",
                 self.max_duration_seconds,

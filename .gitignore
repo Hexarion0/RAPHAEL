@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 # User privacy & Local audio recordings
+/persona.txt
 data/
 *.wav
 *.mp3
