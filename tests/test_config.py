@@ -108,12 +108,13 @@ def test_ambient_and_pause_settings_reach_audio_config():
 def test_listening_defaults_can_be_selected_in_env(tmp_path):
     env_file = tmp_path / '.env'
     env_file.write_text(
-        'AMBIENT_LISTENING=true\nSHOW_TRANSCRIPTS=true\n'
+        'AMBIENT_LISTENING=true\nSHOW_TRANSCRIPTS=true\nSHOW_AI_TRANSCRIPTS=true\n'
         'BARGE_IN_MODE=speech\nBARGE_IN_SPEECH_SECONDS=0.32\n'
     )
     with patch.dict(os.environ, {}, clear=True):
         audio = Settings(_env_file=env_file).audio
     assert audio.ambient_listening and audio.show_transcripts
+    assert audio.show_ai_transcripts
     assert audio.barge_in_mode == 'speech'
     assert audio.barge_in_speech_seconds == 0.32
 

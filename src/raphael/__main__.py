@@ -51,6 +51,12 @@ def main() -> int:
         help="Log raw STT candidates, including rejected ambient speech, for troubleshooting",
     )
     parser.add_argument(
+        "--show-ai-transcripts",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show each AI sentence as playback starts",
+    )
+    parser.add_argument(
         "--count",
         type=int,
         default=8,
@@ -252,6 +258,10 @@ def main() -> int:
         pending_speech: list[str] = []
         unfinished_request: list[dict] = [{}]
         interrupted_reply: list[dict] = [{}]
+        show_ai_transcripts = (
+            settings.audio.show_ai_transcripts
+            if args.show_ai_transcripts is None else args.show_ai_transcripts
+        )
 
         memory_store = MemoryStore(db_path=settings.memory.db_path)
         conv_manager = ConversationManager(
@@ -286,12 +296,22 @@ def main() -> int:
             logger.info("🎯 Wake detected! Details: %s", info)
             _in_followup[0] = False
 
+        def show_spoken_sentence(text: str) -> None:
+            logger.info('🤖 RAPHAEL (speaking): "%s"', tts.clean_text_for_speech(text))
+
         def speak_reply(text: str, block: bool = True, cancel_event=None) -> bool:
             if not loop.is_running or (cancel_event is not None and cancel_event.is_set()):
                 return False
+            controls = {}
             if cancel_event is not None:
-                return tts.speak(text, block=block, cancel_event=cancel_event)
-            return tts.speak(text, block=block)
+                controls["cancel_event"] = cancel_event
+            if show_ai_transcripts:
+                def audio_started() -> None:
+                    if loop.is_running and (cancel_event is None or not cancel_event.is_set()):
+                        show_spoken_sentence(text)
+
+                controls["on_start"] = audio_started
+            return tts.speak(text, block=block, **controls)
 
         def linked_fragments(info: dict) -> list[str]:
             """Recover a request only when this recording canceled that exact request."""
@@ -552,6 +572,7 @@ def main() -> int:
 
                     streamed = stream_reply(
                         router, context_messages, tts, current, cancel_event=cancel_event,
+                        on_sentence_start=show_spoken_sentence if show_ai_transcripts else None,
                     )
                     response = streamed.response
                     request["reply_started"] = streamed.first_audio_seconds is not None

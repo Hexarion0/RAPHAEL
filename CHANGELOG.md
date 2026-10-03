@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5 — 2026-10-04 (development)
+
+- Add live AI speech transcripts at playback start, showing each streaming
+  sentence while it plays. Include local replies and batch TTS; omit speech
+  canceled before playback and clean Markdown using the same speech rules.
+- Add `SHOW_AI_TRANSCRIPTS` and `--show-ai-transcripts` /
+  `--no-show-ai-transcripts` overrides, independent of raw microphone diagnostics.
+  Preserve the final response log and one assistant turn in persistent history.
+
 ## 0.3.4 — 2026-10-04 (development)
 
 - Use active conversation state for ordinary follow-ups and topic changes. Valid

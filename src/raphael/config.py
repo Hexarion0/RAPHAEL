@@ -143,6 +143,7 @@ class AudioConfig(BaseModel):
         description="Enable speech synthesis voice output",
     )
     tts_streaming: bool = Field(default=True)
+    show_ai_transcripts: bool = Field(default=False)
     fish_speech_url: str = Field(
         default="http://127.0.0.1:8080/v1/tts",
         description="Local Fish Speech API server endpoint",
@@ -247,6 +248,7 @@ class Settings(BaseSettings):
     tts_speed: float = Field(default=1.0)
     tts_enabled: bool = Field(default=True)
     tts_streaming: bool = Field(default=True)
+    show_ai_transcripts: bool = Field(default=False)
     fish_speech_url: str = Field(default="http://127.0.0.1:8080/v1/tts")
     fish_ref_audio: str = Field(default="data/voices/mommy/ref.wav")
     fish_ref_text: str = Field(
@@ -333,6 +335,7 @@ class Settings(BaseSettings):
             tts_speed=self.tts_speed,
             tts_enabled=self.tts_enabled,
             tts_streaming=self.tts_streaming,
+            show_ai_transcripts=self.show_ai_transcripts,
             fish_speech_url=self.fish_speech_url,
             fish_ref_audio=self.fish_ref_audio,
             fish_ref_text=self.fish_ref_text,

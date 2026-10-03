@@ -87,11 +87,30 @@ and private audio out of reports.
     history while spoken output omits the code block. Disconnect after a sentence
     starts: expect a connection-cutoff notice, without a fallback answer being
     appended to the partially spoken reply.
+    With `SHOW_AI_TRANSCRIPTS=true`, verify a `RAPHAEL (speaking)` line appears
+    when each sentence starts, rather than after the full reply. A canceled
+    sentence that never plays must not appear. Check the local clock answer and
+    greeting as well. Test both CLI overrides and batch TTS; final history must
+    still contain only one assistant reply. Captions show intended TTS text,
+    including the whole current sentence if it is interrupted mid-playback.
 11. While voice training is running, ask a short unclear question that triggers
     STT retry. Below `STT_RETRY_MIN_FREE_MB`, expect a primary-model retry without
     allocating `medium.en`. After training releases VRAM, a stronger retry can be
     used again and its temporary CUDA model must be released afterward. Record
     GPU memory and transcript quality; this does not prove hum rejection by itself.
+
+## Recorded validation — 2026-10-04 (v0.3.5 patch)
+
+- 501 unit tests passed; three integrations excluded. Ruff, whitespace checks,
+  CLI help, and the v0.3.5 wheel build passed.
+- Regressions verify that live sentence captions follow playback start and
+  precede completed generation, exclude canceled synthesis and queued speech,
+  filter reasoning/code, honor environment and CLI controls, and retain one
+  assistant history turn. Local replies and batch playback are covered.
+- Synthetic custom-voice samples and a separate earlier-checkpoint export were
+  produced for diagnosis. Structural ONNX validation and finite synthesis passed;
+  those checks do not establish intelligibility. Live caption timing and voice
+  listening acceptance remain to be checked on the target desktop.
 
 ## Recorded validation — 2026-10-04 (v0.3.4 patch)
 

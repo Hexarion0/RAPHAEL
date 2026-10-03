@@ -114,8 +114,12 @@ def stream_reply(
     *,
     max_tokens: int = 400,
     cancel_event: threading.Event | None = None,
+    on_sentence_start: Callable[[str], None] | None = None,
 ) -> StreamedReply:
     """Read tokens concurrently with playback and return promptly on interruption.
+
+    ``on_sentence_start`` receives intended sentence text after playback starts;
+    it does not provide word alignment or verify synthesized pronunciation.
 
     Two bounded readers cap resource use if a provider cannot immediately abort
     a blocked read. Every reader owns and closes its own generator.
@@ -172,10 +176,12 @@ def stream_reply(
     visible, audible, sentences = VisibleText(omit_code=False), VisibleText(), SentenceBuffer()
     speech_text = ""
 
-    def audio_started() -> None:
+    def audio_started(sentence: str) -> None:
         if result.first_audio_seconds is None:
             result.first_audio_seconds = time.monotonic() - started
             logger.info("Reply audio started after %.2fs.", result.first_audio_seconds)
+        if on_sentence_start is not None and current():
+            on_sentence_start(sentence)
 
     def speak(parts: list[str]) -> None:
         for part in parts:
@@ -183,7 +189,7 @@ def stream_reply(
                 return
             played = tts.speak(
                 part, block=True, cancel_event=cancel_event or halted, generation=generation,
-                on_start=audio_started,
+                on_start=lambda sentence=part: audio_started(sentence),
             )
             result.spoken |= bool(played)
 

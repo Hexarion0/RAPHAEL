@@ -163,7 +163,7 @@ def test_vad_preserves_partial_chunks_and_converts_integer_audio(monkeypatch):
 def run_callbacks(
     tmp_path, monkeypatch, utterances, *, ambient=True, router=None, observed=None,
     tts=None, interrupted=None,
-    streaming=False, clock=None,
+    streaming=False, clock=None, ai_transcripts=False, cli_args=(),
 ):
     """Run real CLI callbacks using an isolated DB and no audio hardware."""
     import sys
@@ -174,6 +174,7 @@ def run_callbacks(
 
     settings = config.Settings(
         _env_file=None, memory_db_path=str(tmp_path / "memory.db"), tts_streaming=streaming,
+        show_ai_transcripts=ai_transcripts,
     )
     monkeypatch.setattr(config, "get_settings", lambda: settings)
     monkeypatch.setattr(platform, "get_audio_backend", MagicMock())
@@ -205,11 +206,119 @@ def run_callbacks(
     monkeypatch.setattr(__main__, "time", SimpleNamespace(
         sleep=interrupt, monotonic=clock or __main__.time.monotonic,
     ))
-    monkeypatch.setattr(sys, "argv", ["raphael", "--ambient" if ambient else "--listen"])
+    monkeypatch.setattr(sys, "argv", [
+        "raphael", "--ambient" if ambient else "--listen", *cli_args,
+    ])
     assert __main__.main() == 0
     store = MemoryStore(settings.memory.db_path)
     turns = store.get_recent_turns(f"desktop_session:{PERSONA_CONTEXT_VERSION}")
     return router, tts, loop, store, turns
+
+
+@pytest.mark.parametrize('configured, arguments, enabled', [
+    (True, (), True), (False, (), False),
+    (True, ('--no-show-ai-transcripts',), False),
+    (False, ('--show-ai-transcripts',), True),
+])
+def test_live_ai_transcript_config_and_cli_override_at_local_playback(
+    tmp_path, monkeypatch, capsys, configured, arguments, enabled,
+):
+    from raphael.audio.tts import TextToSpeech
+
+    tts = MagicMock()
+    tts.clean_text_for_speech.side_effect = TextToSpeech.clean_text_for_speech
+
+    def speak(text, **controls):
+        assert '(speaking)' not in capsys.readouterr().out
+        callback = controls.get('on_start')
+        assert bool(callback) is enabled
+        if callback:
+            callback()
+        return True
+
+    tts.speak.side_effect = speak
+    _router, _tts, _loop, store, _turns = run_callbacks(
+        tmp_path, monkeypatch, [('Hey Raphael.', {})], tts=tts,
+        ai_transcripts=configured, cli_args=arguments,
+    )
+    try:
+        output = capsys.readouterr().out
+        assert ('RAPHAEL (speaking): "Hey! What\'s on your mind?"' in output) is enabled
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_live_ai_transcripts_show_clean_speech_and_persist_one_reply(
+    tmp_path, monkeypatch, capsys, streaming,
+):
+    from raphael.audio.tts import TextToSpeech
+    from raphael.providers.base import LLMStreamChunk
+
+    router, tts = MagicMock(), MagicMock()
+    text = '**First** sentence. Second sentence.'
+    router.send.return_value = LLMResponse(text, 'test', 'test')
+    router.stream.side_effect = lambda *args, **kwargs: iter([
+        LLMStreamChunk(text, 'test', 'test'),
+    ])
+    tts.clean_text_for_speech.side_effect = TextToSpeech.clean_text_for_speech
+
+    def speak(_text, **controls):
+        controls['on_start']()
+        return True
+
+    tts.speak.side_effect = speak
+    _router, _tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch, [('Raphael, explain this.', {})],
+        router=router, tts=tts, streaming=streaming, ai_transcripts=True,
+    )
+    try:
+        output = capsys.readouterr().out
+        live_lines = [line for line in output.splitlines() if 'RAPHAEL (speaking):' in line]
+        expected = ['First sentence.', 'Second sentence.'] if streaming else [
+            'First sentence. Second sentence.',
+        ]
+        assert [line.split('RAPHAEL (speaking): ')[1] for line in live_lines] == [
+            f'"{sentence}"' for sentence in expected
+        ]
+        assert [turn.content for turn in turns if turn.role == 'assistant'] == [text]
+    finally:
+        store.close()
+
+
+def test_failed_local_playback_has_no_live_ai_transcript(tmp_path, monkeypatch, capsys):
+    tts = MagicMock()
+    tts.speak.return_value = False  # No on_start when synthesis/playback fails.
+    _router, _tts, _loop, store, _turns = run_callbacks(
+        tmp_path, monkeypatch, [('Hey Raphael.', {})], tts=tts, ai_transcripts=True,
+    )
+    try:
+        assert 'RAPHAEL (speaking):' not in capsys.readouterr().out
+    finally:
+        store.close()
+
+
+def test_cancellation_before_batch_playback_callback_has_no_live_ai_transcript(
+    tmp_path, monkeypatch, capsys,
+):
+    router, tts = MagicMock(), MagicMock()
+    router.send.return_value = LLMResponse('Canceled reply.', 'test', 'test')
+
+    def speak(_text, **controls):
+        controls['cancel_event'].set()
+        controls['on_start']()
+        return False
+
+    tts.speak.side_effect = speak
+    _router, _tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch, [('Raphael, explain this.', {'cancel_event': Event()})],
+        router=router, tts=tts, ai_transcripts=True,
+    )
+    try:
+        assert 'RAPHAEL (speaking):' not in capsys.readouterr().out
+        assert [turn.content for turn in turns if turn.role == 'assistant'] == ['Canceled reply.']
+    finally:
+        store.close()
 
 
 def test_followup_window_begins_after_long_playback(tmp_path, monkeypatch):

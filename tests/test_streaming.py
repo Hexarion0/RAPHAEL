@@ -85,6 +85,77 @@ def test_first_sentence_plays_before_provider_finishes(speech, monkeypatch):
     assert tts.stop() is None
 
 
+def test_sentence_callback_arrives_at_playback_before_generation_finishes(speech):
+    tts, played = speech
+    first_sentence, generation_finished = threading.Event(), threading.Event()
+    observed = []
+
+    def sentence_started(text):
+        assert len(played) == len(observed) + 1, "Transcript preceded audio playback"
+        if not observed:
+            assert not generation_finished.is_set(), "Transcript waited for full generation"
+        observed.append(text)
+        first_sentence.set()
+
+    def generate(*args, **kwargs):
+        yield chunk("First sentence. ")
+        assert first_sentence.wait(1), "No first-sentence transcript during generation"
+        generation_finished.set()
+        yield chunk("Second sentence.")
+        yield chunk("", final=True)
+
+    result = stream_reply(
+        SimpleNamespace(stream=generate), [], tts, lambda: True,
+        on_sentence_start=sentence_started,
+    )
+    assert observed == ["First sentence.", "Second sentence."]
+    assert result.spoken and not result.canceled
+    assert generation_finished.is_set()
+
+
+@pytest.mark.parametrize("cancel_sentence", ["First.", "Second."])
+def test_canceled_synthesis_does_not_report_canceled_or_queued_sentences(
+    speech, monkeypatch, cancel_sentence,
+):
+    tts, played = speech
+    entered, release, cancel, finished, synthesized = (threading.Event() for _ in range(5))
+    observed, results = [], []
+
+    def synthesize(text):
+        if text == cancel_sentence:
+            entered.set()
+            try:
+                assert release.wait(2)
+            finally:
+                synthesized.set()
+        return np.ones(160, dtype=np.float32), 16000
+
+    monkeypatch.setattr(tts, "synthesize", synthesize)
+    router = SimpleNamespace(stream=lambda *a, **k: iter([chunk("First. Second. Third. ")]))
+
+    def run():
+        results.append(stream_reply(
+            router, [], tts, lambda: not cancel.is_set(), cancel_event=cancel,
+            on_sentence_start=observed.append,
+        ))
+        finished.set()
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        cancel.set()
+        tts.stop()
+        assert finished.wait(0.5), "Canceled synthesis delayed the new utterance"
+    finally:
+        release.set()
+        worker.join(2)
+        assert synthesized.wait(1)
+    assert results[0].canceled
+    assert observed == ([] if cancel_sentence == "First." else ["First."])
+    assert len(played) == len(observed)
+
+
 def test_cancel_during_blocked_provider_returns_without_waiting(speech):
     tts, played = speech
     entered, release, closed, done, cancel = (threading.Event() for _ in range(5))
@@ -195,6 +266,24 @@ def test_code_stays_in_history_but_is_omitted_from_spoken_reply(speech, monkeypa
     spoken = " ".join(synthesized)
     assert "x = 1" not in spoken and "python" not in spoken
     assert "[code omitted]" in spoken and "That is all." in spoken
+
+
+def test_sentence_transcripts_filter_reasoning_and_code_across_chunk_boundaries(speech):
+    tts, _played = speech
+    observed = []
+    pieces = [
+        "<thi", "nk>Private reasoning. <reflection>Secret.</ref",
+        "lection></think>Here is the code.\n", "``", "`python\nprivate_value = 1\n`",
+        "``\nThat is all.",
+    ]
+    router = SimpleNamespace(stream=lambda *a, **k: (chunk(text) for text in pieces))
+    result = stream_reply(router, [], tts, lambda: True, on_sentence_start=observed.append)
+    assert observed == ["Here is the code.", "[code omitted]", "That is all."]
+    transcripts = " ".join(observed)
+    assert "Private" not in transcripts and "Secret" not in transcripts
+    assert "private_value" not in transcripts and "python" not in transcripts
+    assert "private_value = 1" in result.response.content
+    assert "Private" not in result.response.content and "Secret" not in result.response.content
 
 
 def test_empty_or_reasoning_only_reply_never_plays(speech):
