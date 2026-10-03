@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from raphael import __version__
-from raphael.conversation import is_farewell, strip_wake_phrase
+from raphael.conversation import interpret_clock_address, is_farewell, strip_wake_phrase
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RAW_VOICE_DIR = PROJECT_ROOT / "training" / "raw"
@@ -467,7 +467,10 @@ def main() -> int:
                 conv_manager.add_turn(role="user", content=fragment)
             if not restored_fragments:
                 conv_manager.add_turn(role="user", content=cleaned_query)
-            local_reply = answer_clock_query(cleaned_query)
+            clock_query = (
+                interpret_clock_address(cleaned_query, settings.audio.wake_word) or cleaned_query
+            )
+            local_reply = answer_clock_query(clock_query)
             if local_reply is not None and not earlier_fragments and not added_speech:
                 conv_manager.add_turn(
                     role="assistant", content=local_reply, provider="local", model="clock",

@@ -65,3 +65,27 @@ def is_direct_address(text: str, wake_phrase: str = "hey raphael") -> bool:
         and not re.search(r"\b(?:about|of|with|to|named|called|is|was)\s+" + _RAPHAEL_NAMES,
                           candidate, re.I)
     )
+
+
+def interpret_clock_address(text: str, wake_phrase: str = "hey raphael") -> str | None:
+    """Interpret a bounded clock question ending in the assistant's known name.
+
+    A missing 'it' before the trailing name is a possible STT error, not an
+    explicit address. Callers must keep the original transcript and must not
+    use this interpretation to authorize memory writes or other commands.
+    """
+    if not re.search(r"\b(?:raphael|rafael|raphel|rafeal)\b", wake_phrase, re.I):
+        return None
+    candidate = _ADDRESS_FILLERS.sub("", text.strip().replace("’", "'"), count=1)
+    match = re.fullmatch(
+        r"(?P<question>what time is(?: it(?: (?:now|right now))?)?|"
+        r"what(?:'s| is) (?:the )?(?:current )?time(?: (?:now|right now))?|"
+        r"tell me (?:the )?time)[,\s]+" + _RAPHAEL_NAMES + r"[.!?]*",
+        candidate, re.I,
+    )
+    if match is None:
+        return None
+    question = match.group("question")
+    if question.casefold() == "what time is":
+        question = "What time is it"
+    return question + "?"

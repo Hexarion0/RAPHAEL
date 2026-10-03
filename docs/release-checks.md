@@ -93,6 +93,25 @@ and private audio out of reports.
     used again and its temporary CUDA model must be released afterward. Record
     GPU memory and transcript quality; this does not prove hum rejection by itself.
 
+## Recorded validation — 2026-10-04 (v0.3.3 patch)
+
+- 428 unit tests passed; three integrations excluded. Ruff, whitespace checks,
+  and the runtime version command passed.
+- Replayed the reported “What time is Raphael?” followed by “You sound like a
+  robot, do you know?” through the real CLI callbacks with mocked audio and an
+  isolated database. Both receive replies: local clock first, then one model
+  answer for the feedback, without cloud speech-gate calls.
+- Original transcripts are retained in history. Clock address inferred from a
+  missing “it” is non-explicit and does not authorize memory writes. Regression
+  coverage rejects quoted speech, other listeners, geographic/compound clock
+  requests, custom-assistant mismatches, and appended instructions.
+- Feedback descriptions and brief tags require recent assistant speech within
+  the original follow-up window. Expired and reset contexts still reject them.
+- The reported hardware run already shows `small.en` on CUDA without fallback;
+  microphone acceptance of these new reply-gate rules remains pending. Reproduce
+  using the GPU launcher in ambient mode, ask the clock question by name, and
+  give the voice feedback after the local reply.
+
 ## Recorded validation — 2026-10-04 (v0.3.2 patch)
 
 - 391 unit tests passed; three integrations excluded. Ruff, whitespace checks,

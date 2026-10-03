@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "raphael"
-version = "0.3.2"
+version = "0.3.3"
 description = "A JARVIS-style, always-listening desktop AI assistant"
 readme = "README.md"
 requires-python = ">=3.10"

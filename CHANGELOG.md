@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.3 — 2026-10-04 (development)
+
+- Accept natural descriptions of recent spoken delivery, including “you sound
+  like a robot” and brief conversational tags such as “do you know?” or “right”.
+  Quoted speech, other listeners and unrelated appended instructions still need
+  the ambient intent decision.
+- Recover bounded clock questions ending in RAPHAEL's name when STT drops “it”,
+  such as “What time is Raphael?”. Use the local clock and retain the original
+  wording in history. Inferred address does not authorize memory writes.
+- Answer normal trailing-name clock questions locally as well, avoiding a cloud
+  request for “What's the time Raphael?”.
+
 ## 0.3.2 — 2026-10-04 (development)
 
 - Accept recent feedback about spoken pace and delivery without a cloud speech

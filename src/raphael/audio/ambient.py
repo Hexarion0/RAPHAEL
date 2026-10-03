@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from raphael.conversation import is_direct_address
+from raphael.conversation import interpret_clock_address, is_direct_address
 from raphael.logging import get_logger
 from raphael.providers.base import ChatMessage
 
@@ -60,7 +60,7 @@ class AmbientConversation:
     def _is_speech_feedback(text: str) -> bool:
         """Recognize bounded feedback about the assistant's recent spoken delivery."""
         return bool(re.fullmatch(
-            r"(?:hey[, ]+|please[, ]+)?(?:"
+            r"(?:(?:hey|please|well|so|honestly)[, ]+){0,2}(?:"
             r"(?:why (?:are you|do you)|you(?: are|'re)) "
             r"(?:talk(?:ing)?|speak(?:ing)?|read(?:ing)?) "
             r"(?:so|too|really|very) (?:fast|slow|quickly|slowly|loud|quiet)"
@@ -68,9 +68,11 @@ class AmbientConversation:
             r"|(?:(?:can|could|would) you )?(?:please )?"
             r"(?:speak|talk|read) (?:a (?:little|bit) )?"
             r"(?:slower|faster|more slowly|more clearly|louder|quieter)"
-            r"|(?:your (?:voice|speech)|you) (?:is|are|sounds?|sound) "
-            r"(?:so|too|really|very) (?:fast|slow|robotic|loud|quiet)"
-            r")(?:[, ]+please)?[.!?]*",
+            r"|(?:your (?:voice|speech) (?:is|sounds?)|you sound|you(?:'re| are)) "
+            r"(?:(?:so|too|really|very|a bit|a little) )?"
+            r"(?:fast|slow|robotic|mechanical|unnatural|stiff|dry|loud|quiet|like a robot)"
+            r")(?:(?:[,;.!?]\s*|\s+)"
+            r"(?:please|you know|do you know|right|though|to be honest)){0,2}[.!?]*",
             text.strip().replace("’", "'"), re.I,
         ))
 
@@ -98,6 +100,11 @@ class AmbientConversation:
             return SpeechDecision(True, explicit=True, reason="verified_wake")
         if self.is_explicit(text):
             return SpeechDecision(True, explicit=True, reason="direct_address")
+        clock_question = interpret_clock_address(text, self.wake_phrase)
+        if clock_question:
+            return SpeechDecision(
+                True, interpretation=clock_question, reason="clock_address",
+            )
         if re.match(
             r"^(?:(?:hey|so|well|and|also|actually|but|no|wait)[,\s]+){0,3}"
             r"(?:mom|mum|dad|bro|sis|brother|sister|grandma|grandpa)\b",

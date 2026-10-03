@@ -956,3 +956,33 @@ def test_live_voice_feedback_after_reply_reaches_conversation(tmp_path, monkeypa
         ]
     finally:
         store.close()
+
+
+@pytest.mark.parametrize('original_question', [
+    'What time is Raphael?', "What's the time Raphael?", 'What time is it Rafael?',
+])
+def test_live_clock_recovery_then_robot_feedback_get_two_replies(
+    tmp_path, monkeypatch, original_question,
+):
+    router = MagicMock()
+    router.send.return_value = LLMResponse('I hear you. The voice needs work.', 'test', 'test')
+    original_feedback = 'You sound like a robot, do you know?'
+    _router, tts, _loop, store, turns = run_callbacks(
+        tmp_path, monkeypatch,
+        [(original_question, {'stt_confidence': 0.70}),
+         (original_feedback, {'stt_confidence': 0.77})], router=router,
+    )
+    try:
+        router.send.assert_called_once()  # Clock is local; feedback needs one answer, no gate.
+        assert 'purpose' not in router.send.call_args.kwargs
+        assert tts.speak.call_count == 2
+        assert [(turn.role, turn.content) for turn in turns if turn.role == 'user'] == [
+            ('user', original_question), ('user', original_feedback),
+        ]
+        assistant_turns = [turn for turn in turns if turn.role == 'assistant']
+        assert assistant_turns[0].provider == 'local' and assistant_turns[0].model == 'clock'
+        assert assistant_turns[0].content.startswith("It's ")
+        assert assistant_turns[1].content == 'I hear you. The voice needs work.'
+        assert router.send.call_args.args[0][-1].content == original_feedback
+    finally:
+        store.close()

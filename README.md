@@ -2,7 +2,7 @@
 
 > A JARVIS-style, always-listening desktop AI assistant — its own voice, multi-provider AI routing, memory, and messaging integration, built one feature at a time.
 
-**Status:** v0.3.2 development — persistent memory and streamed voice conversations.
+**Status:** v0.3.3 development — persistent memory and streamed voice conversations.
 Live microphone acceptance remains in [`docs/release-checks.md`](docs/release-checks.md).
 
 ---
@@ -114,7 +114,9 @@ Missing or retired models (HTTP 404/410) immediately try the configured NIM back
 Empty or reasoning-only responses also try that backup once; reasoning is never
 used as the spoken answer. Fallback never splices a new answer into partial speech.
 Standalone time and date questions are answered from the local clock without an
-AI request. Background summaries use the economical route (Groq when configured,
+AI request. Bounded clock questions ending in the assistant's name also work,
+including “What time is Raphael?” when speech recognition drops “it”. That recovery
+retains the raw transcript and does not authorize memory commands. Background summaries use the economical route (Groq when configured,
 otherwise the default NIM model), with separate `summary` routing logs. Technical
 words or long messages alone do not select the complex model; implementation,
 debugging, architecture, and explicit `/strong` requests do. `/fast` and `/local`
@@ -236,7 +238,9 @@ speech without a wake phrase at 16 kHz. Direct addresses are handled locally;
 possible follow-ups within `AMBIENT_FOLLOWUP_SECONDS` (40 in the example `.env`)
 use an economical `speech_gate` request before a reply. Bounded feedback about
 recent spoken delivery, such as “Why are you talking so fast right now?” or
-“Could you speak more slowly?”, is accepted locally during that window. An
+“Could you speak more slowly?”, is accepted locally during that window.
+Natural descriptions such as “You sound like a robot, do you know?” also qualify;
+quoted speech and sentences addressed to someone else still go through the gate. An
 uncertain fragment leaves the original follow-up deadline intact; confirmed speech
 to someone else closes it. This feedback rule permits a response; it does not
 itself change the configured `TTS_SPEED`. Unclear intent, malformed judgments, provider
